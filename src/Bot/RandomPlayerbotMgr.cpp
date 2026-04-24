@@ -281,7 +281,7 @@ void RandomPlayerbotMgr::LogPlayerLocation()
     }
 }
 
-void RandomPlayerbotMgr::UpdateAIInternal(uint32 elapsed, bool /*minimal*/)
+void RandomPlayerbotMgr::UpdateAIInternal(uint32 /*elapsed*/, bool /*minimal*/)
 {
     if (totalPmo)
         totalPmo->finish();
