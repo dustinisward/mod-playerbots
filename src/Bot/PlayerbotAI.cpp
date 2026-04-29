@@ -6,6 +6,8 @@
 #include "PlayerbotAI.h"
 
 #include <cmath>
+#include <fstream>
+#include <filesystem>
 #include <mutex>
 #include <sstream>
 #include <string>
@@ -262,6 +264,13 @@ void PlayerbotAI::UpdateAI(uint32 elapsed, bool minimal)
     }
 
     AllowActivity();
+
+    llmCheckTimer_ += elapsed;
+    if (llmCheckTimer_ >= 1000)
+    {
+        llmCheckTimer_ = 0;
+        CheckLLMChatResponses();
+    }
 
     if (!CanUpdateAI())
         return;
@@ -578,9 +587,23 @@ void PlayerbotAI::HandleCommands()
 
         if (!helper.ParseChatCommand(command, owner) && it->GetType() == CHAT_MSG_WHISPER)
         {
-            // ostringstream out; out << "Unknown command " << command;
-            // TellPlayer(out);
-            // helper.ParseChatCommand("help");
+            if (Player* sender = it->GetOwner())
+            {
+                try
+                {
+                    std::filesystem::create_directories("matrix/data/llm_chat");
+                    std::ofstream qf("matrix/data/llm_chat/incoming.tsv", std::ios::app);
+                    if (qf.is_open())
+                    {
+                        qf << bot->GetGUID().GetCounter() << "\t"
+                           << bot->GetName() << "\t"
+                           << sender->GetGUID().GetCounter() << "\t"
+                           << sender->GetName() << "\t"
+                           << command << "\n";
+                    }
+                }
+                catch (...) {}
+            }
         }
 
         it = chatCommands.erase(it);
@@ -935,6 +958,40 @@ bool PlayerbotAI::IsAllowedCommand(std::string const text)
     }
 
     return false;
+}
+
+void PlayerbotAI::CheckLLMChatResponses()
+{
+    if (!bot)
+        return;
+
+    std::string respPath = "matrix/data/llm_chat/resp_" +
+        std::to_string(bot->GetGUID().GetCounter()) + ".txt";
+
+    try
+    {
+        if (!std::filesystem::exists(respPath))
+            return;
+
+        std::ifstream rf(respPath);
+        std::string line;
+        while (std::getline(rf, line))
+        {
+            auto delim = line.find('\t');
+            if (delim == std::string::npos)
+                continue;
+            uint32 playerGuidLow = static_cast<uint32>(std::stoul(line.substr(0, delim)));
+            std::string response  = line.substr(delim + 1);
+            if (response.empty())
+                continue;
+            ObjectGuid pguid = ObjectGuid::Create<HighGuid::Player>(playerGuidLow);
+            if (Player* target = ObjectAccessor::FindPlayer(pguid))
+                bot->Whisper(response, LANG_UNIVERSAL, target);
+        }
+        rf.close();
+        std::filesystem::remove(respPath);
+    }
+    catch (...) {}
 }
 
 void PlayerbotAI::HandleCommand(uint32 type, std::string const text, Player* fromPlayer)

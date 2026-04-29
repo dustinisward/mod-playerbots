@@ -650,6 +650,8 @@ protected:
     Position jumpDestination = Position();
     uint32 nextTransportCheck = 0;
     bool spellInterruptRequested = false;
+    void CheckLLMChatResponses();
+    uint32 llmCheckTimer_{0};
 };
 
 #endif
