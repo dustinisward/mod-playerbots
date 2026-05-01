@@ -8,6 +8,9 @@
 #include "GossipDef.h"
 #include "GridTerrainData.h"
 #include "IVMapMgr.h"
+#include "Item.h"
+#include "ItemTemplate.h"
+#include "LootMgr.h"
 #include "NewRpgInfo.h"
 #include "NewRpgStrategy.h"
 #include "Object.h"
@@ -26,6 +29,9 @@
 #include "Random.h"
 #include "RandomPlayerbotMgr.h"
 #include "SharedDefines.h"
+#include "Spell.h"
+#include "SpellInfo.h"
+#include "SpellMgr.h"
 #include "StatsWeightCalculator.h"
 #include "Timer.h"
 #include "TravelMgr.h"
@@ -708,6 +714,503 @@ bool NewRpgBaseAction::SearchQuestGiverAndAcceptOrReward()
     }
     return false;
 }
+
+static bool BotNeedsItemForQuest(Player* bot, uint32 itemId)
+{
+    for (uint16 slot = 0; slot < MAX_QUEST_LOG_SIZE; ++slot)
+    {
+        uint32 questId = bot->GetQuestSlotQuestId(slot);
+        if (!questId)
+            continue;
+        if (bot->GetQuestStatus(questId) != QUEST_STATUS_INCOMPLETE)
+            continue;
+        Quest const* quest = sObjectMgr->GetQuestTemplate(questId);
+        if (!quest)
+            continue;
+        QuestStatusData const& qs = bot->getQuestStatusMap().at(questId);
+        for (int i = 0; i < QUEST_ITEM_OBJECTIVES_COUNT; ++i)
+        {
+            if (!quest->RequiredItemCount[i])
+                continue;
+            if (qs.ItemCount[i] >= quest->RequiredItemCount[i])
+                continue;
+            if (quest->RequiredItemId[i] == itemId)
+                return true;
+        }
+    }
+    return false;
+}
+
+bool NewRpgBaseAction::TryLootQuestGO(ObjectGuid& pursuedGO, float searchRange)
+{
+    if (!bot->IsAlive() || bot->IsBeingTeleported() || bot->IsInFlight() ||
+        bot->GetVehicle() || bot->GetTransport())
+        return false;
+
+    // valid = spawned, selectable, holds a quest item we still need.
+    // INTERACT_COND is fine — ConditionMgr already gates on quest state.
+    auto isValidTarget = [&](GameObject* go) -> bool
+    {
+        if (!go || !go->IsInWorld() || !go->isSpawned())
+            return false;
+        if (!(go->GetPhaseMask() & bot->GetPhaseMask()))
+            return false;
+        if (go->HasGameObjectFlag(GO_FLAG_NOT_SELECTABLE))
+            return false;
+        GameObjectTemplate const* info = go->GetGOInfo();
+        if (!info)
+            return false;
+
+        // per-player quest drops via gameobject_questitem (Webwood Eggs…)
+        if (GameObjectQuestItemList const* items =
+                sObjectMgr->GetGameObjectQuestItemList(go->GetEntry()))
+        {
+            for (size_t i = 0; i < MAX_GAMEOBJECT_QUEST_ITEMS && i < items->size(); ++i)
+            {
+                uint32 itemId = uint32((*items)[i]);
+                if (!itemId)
+                    continue;
+                if (BotNeedsItemForQuest(bot, itemId))
+                    return true;
+            }
+        }
+
+        // standard loot template (chests, fishing holes)
+        if (uint32 lootId = info->GetLootId())
+        {
+            if (LootTemplates_Gameobject.HaveQuestLootForPlayer(lootId, bot))
+                return true;
+        }
+        return false;
+    };
+
+    // 2.5y sits inside the 3.5y loot gate with headroom
+    const float lootRange = 2.5f;
+
+    // stick with the committed target — re-picking nearest every tick
+    // causes zig-zag walks in dense spawn clusters
+    if (pursuedGO)
+    {
+        GameObject* existing = botAI->GetGameObject(pursuedGO);
+        if (existing && isValidTarget(existing) &&
+            bot->GetDistance(existing) <= searchRange)
+        {
+            if (bot->GetDistance(existing) > lootRange)
+                return MoveWorldObjectTo(existing->GetGUID(), lootRange);
+            // in range — loot strategy opens it
+            return true;
+        }
+        pursuedGO.Clear();
+    }
+
+    GuidVector possibleGameObjects = AI_VALUE(GuidVector, "possible new rpg game objects");
+    if (possibleGameObjects.empty())
+        return false;
+
+    GameObject* best = nullptr;
+    float bestDist = searchRange;
+    for (ObjectGuid guid : possibleGameObjects)
+    {
+        GameObject* go = botAI->GetGameObject(guid);
+        if (!isValidTarget(go))
+            continue;
+        float d = bot->GetDistance(go);
+        if (d >= bestDist)
+            continue;
+        best = go;
+        bestDist = d;
+    }
+    if (!best)
+        return false;
+
+    // commit
+    pursuedGO = best->GetGUID();
+
+    if (bot->GetDistance(best) > lootRange)
+        return MoveWorldObjectTo(best->GetGUID(), lootRange);
+
+    // in range — consume the tick so we don't fall through to wander
+    return true;
+}
+
+bool NewRpgBaseAction::TryUseQuestGO(ObjectGuid& pursuedGO, float searchRange)
+{
+    if (!bot->IsAlive() || bot->IsBeingTeleported() || bot->IsInFlight() ||
+        bot->GetVehicle() || bot->GetTransport())
+        return false;
+
+    std::unordered_set<uint32> neededGoEntries;
+    for (uint16 slot = 0; slot < MAX_QUEST_LOG_SIZE; ++slot)
+    {
+        uint32 questId = bot->GetQuestSlotQuestId(slot);
+        if (!questId)
+            continue;
+        if (bot->GetQuestStatus(questId) != QUEST_STATUS_INCOMPLETE)
+            continue;
+        Quest const* quest = sObjectMgr->GetQuestTemplate(questId);
+        if (!quest)
+            continue;
+        QuestStatusData const& qs = bot->getQuestStatusMap().at(questId);
+        for (int i = 0; i < QUEST_OBJECTIVES_COUNT; ++i)
+        {
+            int32 entry = quest->RequiredNpcOrGo[i];
+            if (entry >= 0)
+                continue;
+            if (qs.CreatureOrGOCount[i] >= quest->RequiredNpcOrGoCount[i])
+                continue;
+            neededGoEntries.insert(uint32(-entry));
+        }
+    }
+    if (neededGoEntries.empty())
+        return false;
+
+    auto isValidTarget = [&](GameObject* go) -> bool
+    {
+        if (!go || !go->IsInWorld() || !go->isSpawned())
+            return false;
+        if (!(go->GetPhaseMask() & bot->GetPhaseMask()))
+            return false;
+        if (go->HasGameObjectFlag(GO_FLAG_NOT_SELECTABLE))
+            return false;
+        return neededGoEntries.count(go->GetEntry()) > 0;
+    };
+
+    // commitment first
+    if (pursuedGO)
+    {
+        GameObject* existing = botAI->GetGameObject(pursuedGO);
+        if (existing && isValidTarget(existing) &&
+            bot->GetDistance(existing) <= searchRange)
+        {
+            if (bot->GetDistance(existing) > INTERACTION_DISTANCE)
+                return MoveWorldObjectTo(existing->GetGUID(), INTERACTION_DISTANCE);
+            existing->Use(bot);
+            ForceToWait(2000);
+            pursuedGO.Clear();
+            return true;
+        }
+        pursuedGO.Clear();
+    }
+
+    GuidVector possibleGameObjects = AI_VALUE(GuidVector, "possible new rpg game objects");
+    GameObject* best = nullptr;
+    float bestDist = searchRange;
+    for (ObjectGuid guid : possibleGameObjects)
+    {
+        GameObject* go = botAI->GetGameObject(guid);
+        if (!isValidTarget(go))
+            continue;
+        float d = bot->GetDistance(go);
+        if (d >= bestDist)
+            continue;
+        best = go;
+        bestDist = d;
+    }
+    if (!best)
+        return false;
+
+    pursuedGO = best->GetGUID();
+
+    if (bot->GetDistance(best) > INTERACTION_DISTANCE)
+        return MoveWorldObjectTo(best->GetGUID(), INTERACTION_DISTANCE);
+
+    best->Use(bot);
+    ForceToWait(2000);
+    pursuedGO.Clear();
+    return true;
+}
+
+bool NewRpgBaseAction::TryUseQuestItem(ObjectGuid& pursuedGO, ObjectGuid& pursuedTarget, float searchRange)
+{
+    if (!bot->IsAlive() || bot->IsBeingTeleported() || bot->IsInFlight() ||
+        bot->GetVehicle() || bot->GetTransport())
+        return false;
+
+    std::unordered_set<uint32> candidateItemEntries;
+    // src items (the quest gave the bot a single item to use); branch C
+    // (self/area cast) is only safe to fire on these — auto-firing every
+    // ItemDrop on self can burn kill-credit sentinels and trigger
+    // unintended scripted side effects.
+    std::unordered_set<uint32> srcItemEntries;
+    std::unordered_set<uint32> neededCreatureEntries;
+    for (uint16 slot = 0; slot < MAX_QUEST_LOG_SIZE; ++slot)
+    {
+        uint32 questId = bot->GetQuestSlotQuestId(slot);
+        if (!questId)
+            continue;
+        if (bot->GetQuestStatus(questId) != QUEST_STATUS_INCOMPLETE)
+            continue;
+        Quest const* quest = sObjectMgr->GetQuestTemplate(questId);
+        if (!quest)
+            continue;
+        if (uint32 src = quest->GetSrcItemId())
+        {
+            candidateItemEntries.insert(src);
+            srcItemEntries.insert(src);
+        }
+        // handed out by the quest (brands, flares, nets, standards)
+        for (int i = 0; i < QUEST_SOURCE_ITEM_IDS_COUNT; ++i)
+        {
+            if (uint32 drop = quest->ItemDrop[i])
+                candidateItemEntries.insert(drop);
+        }
+        QuestStatusData const& qs = bot->getQuestStatusMap().at(questId);
+        for (int i = 0; i < QUEST_OBJECTIVES_COUNT; ++i)
+        {
+            int32 entry = quest->RequiredNpcOrGo[i];
+            if (entry <= 0)
+                continue;
+            if (qs.CreatureOrGOCount[i] >= quest->RequiredNpcOrGoCount[i])
+                continue;
+            neededCreatureEntries.insert(uint32(entry));
+        }
+    }
+    if (candidateItemEntries.empty())
+        return false;
+
+    for (uint32 itemEntry : candidateItemEntries)
+    {
+        Item* item = bot->GetItemByEntry(itemEntry);
+        if (!item)
+            continue;
+        ItemTemplate const* proto = item->GetTemplate();
+        if (!proto)
+            continue;
+        uint32 useSpellId = 0;
+        for (uint8 i = 0; i < MAX_ITEM_PROTO_SPELLS; ++i)
+        {
+            if (proto->Spells[i].SpellTrigger != ITEM_SPELLTRIGGER_ON_USE)
+                continue;
+            if (proto->Spells[i].SpellId <= 0)
+                continue;
+            useSpellId = proto->Spells[i].SpellId;
+            break;
+        }
+        if (!useSpellId)
+            continue;
+        SpellInfo const* spellInfo = sSpellMgr->GetSpellInfo(useSpellId);
+        if (!spellInfo)
+            continue;
+
+        // A: spell needs a focus GO (moonwell / lectern / anvil)
+        if (uint32 focusId = spellInfo->RequiresSpellFocus)
+        {
+            auto focusRadius = [](GameObject* go) -> float
+            {
+                GameObjectTemplate const* info = go->GetGOInfo();
+                // half radius so we end up inside, not on the rim
+                return std::max<float>(1.0f, float(info->spellFocus.dist) * 0.5f);
+            };
+            auto isValidFocus = [&](GameObject* go) -> bool
+            {
+                if (!go || !go->IsInWorld() || !go->isSpawned())
+                    return false;
+                if (!(go->GetPhaseMask() & bot->GetPhaseMask()))
+                    return false;
+                if (go->HasGameObjectFlag(GO_FLAG_NOT_SELECTABLE))
+                    return false;
+                GameObjectTemplate const* info = go->GetGOInfo();
+                if (!info || info->type != GAMEOBJECT_TYPE_SPELL_FOCUS)
+                    return false;
+                return info->spellFocus.focusId == focusId;
+            };
+
+            // commitment first
+            if (pursuedGO)
+            {
+                GameObject* existing = botAI->GetGameObject(pursuedGO);
+                if (existing && isValidFocus(existing) &&
+                    bot->GetDistance(existing) <= searchRange)
+                {
+                    float radius = focusRadius(existing);
+                    if (bot->GetDistance(existing) > radius)
+                        return MoveWorldObjectTo(existing->GetGUID(), radius);
+                    SpellCastTargets targets;
+                    bot->CastItemUseSpell(item, targets, 1, 0);
+                    ForceToWait(2000);
+                    pursuedGO.Clear();
+                    return true;
+                }
+                pursuedGO.Clear();
+            }
+
+            GuidVector possibleGameObjects = AI_VALUE(GuidVector, "possible new rpg game objects");
+            GameObject* best = nullptr;
+            float bestDist = searchRange;
+            float bestRadius = INTERACTION_DISTANCE;
+            for (ObjectGuid guid : possibleGameObjects)
+            {
+                GameObject* go = botAI->GetGameObject(guid);
+                if (!isValidFocus(go))
+                    continue;
+                float d = bot->GetDistance(go);
+                if (d >= bestDist)
+                    continue;
+                best = go;
+                bestDist = d;
+                bestRadius = focusRadius(go);
+            }
+            if (best)
+            {
+                pursuedGO = best->GetGUID();
+                if (bot->GetDistance(best) > bestRadius)
+                    return MoveWorldObjectTo(best->GetGUID(), bestRadius);
+                SpellCastTargets targets;
+                bot->CastItemUseSpell(item, targets, 1, 0);
+                ForceToWait(2000);
+                pursuedGO.Clear();
+                return true;
+            }
+            continue;
+        }
+
+        // B: spell needs a unit target — walk to the required creature
+        if (spellInfo->NeedsExplicitUnitTarget() && !neededCreatureEntries.empty())
+        {
+            auto isValidCreature = [&](Creature* c) -> bool
+            {
+                if (!c || !c->IsInWorld() || !c->IsAlive())
+                    return false;
+                if (!(c->GetPhaseMask() & bot->GetPhaseMask()))
+                    return false;
+                return neededCreatureEntries.count(c->GetEntry()) > 0;
+            };
+
+            // commitment first
+            if (pursuedTarget)
+            {
+                Creature* existing = botAI->GetCreature(pursuedTarget);
+                if (existing && isValidCreature(existing) &&
+                    bot->GetDistance(existing) <= searchRange)
+                {
+                    if (bot->GetDistance(existing) > INTERACTION_DISTANCE)
+                        return MoveWorldObjectTo(existing->GetGUID(), INTERACTION_DISTANCE);
+                    SpellCastTargets targets;
+                    targets.SetUnitTarget(existing);
+                    bot->CastItemUseSpell(item, targets, 1, 0);
+                    ForceToWait(2000);
+                    pursuedTarget.Clear();
+                    return true;
+                }
+                pursuedTarget.Clear();
+            }
+
+            GuidVector possibleTargets = AI_VALUE(GuidVector, "possible new rpg targets");
+            Creature* best = nullptr;
+            float bestDist = searchRange;
+            for (ObjectGuid guid : possibleTargets)
+            {
+                Creature* c = botAI->GetCreature(guid);
+                if (!isValidCreature(c))
+                    continue;
+                float d = bot->GetDistance(c);
+                if (d >= bestDist)
+                    continue;
+                best = c;
+                bestDist = d;
+            }
+            if (best)
+            {
+                pursuedTarget = best->GetGUID();
+                if (bot->GetDistance(best) > INTERACTION_DISTANCE)
+                    return MoveWorldObjectTo(best->GetGUID(), INTERACTION_DISTANCE);
+                SpellCastTargets targets;
+                targets.SetUnitTarget(best);
+                bot->CastItemUseSpell(item, targets, 1, 0);
+                ForceToWait(2000);
+                pursuedTarget.Clear();
+                return true;
+            }
+            continue;
+        }
+
+        // C: self / area — fire at bot's position. Restrict to GetSrcItemId
+        // items (the single item the quest hands the bot for self-use, e.g.
+        // a potion). ItemDrop entries can be kill-credit sentinels or
+        // scripted items that should never be auto-used on self.
+        if (!srcItemEntries.count(itemEntry))
+            continue;
+        SpellCastTargets targets;
+        if (spellInfo->IsTargetingArea())
+            targets.SetDst(*bot);
+        else
+            targets.SetUnitTarget(bot);
+        bot->CastItemUseSpell(item, targets, 1, 0);
+        ForceToWait(2000);
+        return true;
+    }
+
+    return false;
+}
+
+bool NewRpgBaseAction::HasNearbyQuestMob(float range)
+{
+    // kill objectives + mobs that drop required quest items
+    std::unordered_set<uint32> neededCreatureEntries;
+    std::unordered_set<uint32> neededItemIds;
+    for (uint16 slot = 0; slot < MAX_QUEST_LOG_SIZE; ++slot)
+    {
+        uint32 questId = bot->GetQuestSlotQuestId(slot);
+        if (!questId)
+            continue;
+        if (bot->GetQuestStatus(questId) != QUEST_STATUS_INCOMPLETE)
+            continue;
+        Quest const* quest = sObjectMgr->GetQuestTemplate(questId);
+        if (!quest)
+            continue;
+        QuestStatusData const& qs = bot->getQuestStatusMap().at(questId);
+        for (int i = 0; i < QUEST_OBJECTIVES_COUNT; ++i)
+        {
+            int32 entry = quest->RequiredNpcOrGo[i];
+            if (entry <= 0)
+                continue;
+            if (qs.CreatureOrGOCount[i] >= quest->RequiredNpcOrGoCount[i])
+                continue;
+            neededCreatureEntries.insert(uint32(entry));
+        }
+        for (int i = 0; i < QUEST_ITEM_OBJECTIVES_COUNT; ++i)
+        {
+            if (!quest->RequiredItemCount[i])
+                continue;
+            if (qs.ItemCount[i] >= quest->RequiredItemCount[i])
+                continue;
+            if (quest->RequiredItemId[i])
+                neededItemIds.insert(quest->RequiredItemId[i]);
+        }
+    }
+    if (neededCreatureEntries.empty() && neededItemIds.empty())
+        return false;
+
+    GuidVector possibleTargets = AI_VALUE(GuidVector, "possible targets");
+    for (ObjectGuid guid : possibleTargets)
+    {
+        Creature* c = botAI->GetCreature(guid);
+        if (!c || !c->IsInWorld() || !c->IsAlive())
+            continue;
+        if (!(c->GetPhaseMask() & bot->GetPhaseMask()))
+            continue;
+        if (bot->GetDistance(c) > range)
+            continue;
+
+        // direct kill objective
+        if (neededCreatureEntries.count(c->GetEntry()))
+            return true;
+
+        // drops a required quest item — HaveQuestLootForPlayer
+        // already filters by what this player still needs
+        if (!neededItemIds.empty())
+        {
+            CreatureTemplate const* tmpl = c->GetCreatureTemplate();
+            if (tmpl && tmpl->lootid &&
+                LootTemplates_Creature.HaveQuestLootForPlayer(tmpl->lootid, bot))
+            {
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
 
 ObjectGuid NewRpgBaseAction::ChooseNpcOrGameObjectToInteract(bool questgiverOnly, float distanceLimit)
 {

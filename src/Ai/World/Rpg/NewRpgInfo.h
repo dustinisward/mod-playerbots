@@ -46,6 +46,11 @@ struct NewRpgInfo
         int32 objectiveIdx{0};
         WorldPosition pos{};
         uint32 lastReachPOI{0};
+        // committed target per objective type. stops zig-zagging in
+        // dense spawn clusters when "nearest" would flip each tick.
+        ObjectGuid pursuedLootGO{};      // GOs we loot (lilies, eggs)
+        ObjectGuid pursuedUseGO{};       // GOs we click or focus on
+        ObjectGuid pursuedUseTarget{};   // creature we apply an item to
     };
     // RPG_TRAVEL_FLIGHT
     struct TravelFlight

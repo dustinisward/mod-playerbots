@@ -51,6 +51,23 @@ protected:
     bool TurnInQuest(Quest const* quest, ObjectGuid guid);
     bool OrganizeQuestLog();
 
+    /* QUEST PROGRESSION HELPERS (at POI) */
+    // Walk to a GO that drops a needed quest item. The loot strategy
+    // opens and loots it once in range.
+    bool TryLootQuestGO(ObjectGuid& pursuedGO, float searchRange = 60.0f);
+
+    // Walk to / use a GO that is itself the objective (rune, lever,
+    // altar, coffin — RequiredNpcOrGo with a negative entry).
+    bool TryUseQuestGO(ObjectGuid& pursuedGO, float searchRange = 60.0f);
+
+    // Fire a quest item's OnUse spell at the right target: a spell-focus
+    // GO (moonwell), a required creature, or the bot itself.
+    bool TryUseQuestItem(ObjectGuid& pursuedGO, ObjectGuid& pursuedTarget, float searchRange = 60.0f);
+
+    // True when a quest-relevant mob is within range — used during
+    // travel so we yield to attack-anything instead of running past.
+    bool HasNearbyQuestMob(float range = 20.0f);
+
 protected:
     bool GetQuestPOIPosAndObjectiveIdx(uint32 questId, std::vector<POIInfo>& poiInfo, bool toComplete = false);
     static WorldPosition SelectRandomGrindPos(Player* bot);

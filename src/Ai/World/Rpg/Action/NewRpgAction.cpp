@@ -19,6 +19,7 @@
 #include "PathGenerator.h"
 #include "Player.h"
 #include "PlayerbotAI.h"
+#include "Playerbots.h"
 #include "QuestDef.h"
 #include "Random.h"
 #include "SharedDefines.h"
@@ -292,6 +293,9 @@ bool NewRpgDoQuestAction::DoIncompleteQuest(NewRpgInfo::DoQuest& data)
             data.lastReachPOI = 0;
             data.pos = WorldPosition();
             data.objectiveIdx = 0;
+            data.pursuedLootGO.Clear();
+            data.pursuedUseGO.Clear();
+            data.pursuedUseTarget.Clear();
         }
     }
     if (data.pos == WorldPosition())
@@ -320,15 +324,38 @@ bool NewRpgDoQuestAction::DoIncompleteQuest(NewRpgInfo::DoQuest& data)
         data.lastReachPOI = 0;
         data.pos = pos;
         data.objectiveIdx = objectiveIdx;
+        data.pursuedLootGO.Clear();
+        data.pursuedUseGO.Clear();
+        data.pursuedUseTarget.Clear();
     }
 
     if (bot->GetDistance(data.pos) > 10.0f && !data.lastReachPOI)
     {
+        // yield to attack-anything if a quest mob is right next to us
+        if (HasNearbyQuestMob(15.0f))
+            return false;
+
+        // Occasional yield so attack-anything can pick off a passing
+        // hostile. Gated on "hostile actually in range" so we don't
+        // burn ticks yielding into nothing, and rate-limited so we
+        // don't fight every mob we walk past — multiplier still
+        // dominates, this just opens an occasional window.
+        GuidVector nearbyTargets = AI_VALUE(GuidVector, "possible targets");
+        for (ObjectGuid guid : nearbyTargets)
+        {
+            Unit* u = botAI->GetUnit(guid);
+            if (!u || !u->IsAlive())
+                continue;
+            if (bot->GetDistance(u) > 25.0f)
+                continue;
+            if (urand(0, 9) == 0)  // 10% per tick when a hostile is in range
+                return false;
+            break;
+        }
+
         if (MoveFarTo(data.pos))
             return true;
-        // Long-range sampler couldn't land a candidate — nudge the
-        // bot a short distance so the next tick retries from a
-        // different position instead of sitting idle.
+        // sampler found nothing — nudge so next tick tries a new pos
         return MoveRandomNear(10.0f);
     }
     // Now we are near the quest objective
@@ -373,14 +400,72 @@ bool NewRpgDoQuestAction::DoIncompleteQuest(NewRpgInfo::DoQuest& data)
         data.lastReachPOI = 0;
         data.pos = WorldPosition();
         data.objectiveIdx = 0;
+        data.pursuedLootGO.Clear();
+        data.pursuedUseGO.Clear();
+        data.pursuedUseTarget.Clear();
         return true;
     }
 
-    // At the POI: keep the bot actively placed but avoid large
-    // random 20yd hops that look like pacing back and forth. A small
-    // ~8yd wander reads as the bot looking around while grind/loot
-    // strategies do their work.
-    return MoveRandomNear(8.0f);
+    // at POI: drive toward specific objectives first
+    if (TryUseQuestItem(data.pursuedUseGO, data.pursuedUseTarget))
+        return true;
+    if (TryLootQuestGO(data.pursuedLootGO))
+        return true;
+    if (TryUseQuestGO(data.pursuedUseGO))
+        return true;
+
+    // gather quests: roam for spawns. kill quests: yield to grind.
+    Quest const* quest = sObjectMgr->GetQuestTemplate(questId);
+    if (quest)
+    {
+        int32 obj = data.objectiveIdx;
+        bool isGatherObjective = false;
+        if (obj < QUEST_OBJECTIVES_COUNT)
+        {
+            int32 entry = quest->RequiredNpcOrGo[obj];
+            if (entry < 0)  // GO objective
+                isGatherObjective = true;
+            if (entry == 0 && obj < QUEST_ITEM_OBJECTIVES_COUNT && quest->RequiredItemId[obj])
+                isGatherObjective = true;
+        }
+        else if (obj < QUEST_OBJECTIVES_COUNT + QUEST_ITEM_OBJECTIVES_COUNT)
+        {
+            isGatherObjective = true;
+        }
+        // source-item quest: need to find the target to use it on
+        if (quest->GetSrcItemId())
+            isGatherObjective = true;
+
+        if (isGatherObjective)
+            return MoveRandomNear(20.0f);
+    }
+
+    // kill quest: walk toward the marker before handing off to grind.
+    // lastReachPOI trips at ~10y so without this the bot fights on the
+    // edge and never reaches the dense cluster. Skip if a quest mob is
+    // in sight (might be the target) or a hostile is mid-pull.
+    if (bot->GetDistance(data.pos) > 5.0f)
+    {
+        if (HasNearbyQuestMob(30.0f))
+            return false;
+
+        GuidVector nearby = AI_VALUE(GuidVector, "possible targets");
+        bool hostileClose = false;
+        for (ObjectGuid guid : nearby)
+        {
+            Unit* u = botAI->GetUnit(guid);
+            if (u && u->IsAlive() && bot->GetDistance(u) < 15.0f)
+            {
+                hostileClose = true;
+                break;
+            }
+        }
+        if (!hostileClose)
+            return MoveFarTo(data.pos);
+    }
+
+    // yield to grind
+    return false;
 }
 
 bool NewRpgDoQuestAction::DoCompletedQuest(NewRpgInfo::DoQuest& data)
@@ -444,7 +529,9 @@ bool NewRpgDoQuestAction::DoCompletedQuest(NewRpgInfo::DoQuest& data)
         botAI->rpgInfo.ChangeToIdle();
         return true;
     }
-    return false;
+    // waiting for SearchQuestGiverAndAcceptOrReward to pick up the NPC;
+    // wander instead of false so we don't fall through to grind
+    return MoveRandomNear(15.0f);
 }
 
 bool NewRpgTravelFlightAction::Execute(Event /*event*/)
