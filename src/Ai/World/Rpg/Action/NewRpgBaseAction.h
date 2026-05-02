@@ -81,10 +81,9 @@ protected:
     // Distance at which MoveFarTo considers the travel-node graph as
     // a routing option. Below this, the move is short enough that
     // mmap handles it directly. Above this, mmap is *still probed
-    // first* via the 40-step chained pathfinder; the node graph only
-    // takes over if mmap can't get within spellDistance of the
-    // destination. Matches cmangos-playerbots' sightDistance gate
-    // (75y) — the only long-path threshold they use.
+    // first* via the 40-step chained pathfinder; the node graph
+    // only takes over if mmap can't get within spellDistance of
+    // the destination.
     const float nodeFirstDis = 75.0f;
 
 private:

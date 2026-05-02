@@ -722,14 +722,13 @@ std::vector<WorldPosition> WorldPosition::getPathStepFrom(WorldPosition startPos
     }
 
     // Explicit-start overload (PathGenerator.h:67). Without this,
-    // CalculatePath(destX,destY,destZ) defaults to the unit's CURRENT
-    // position as start — which means every iteration of
+    // CalculatePath(destX,destY,destZ) defaults to the unit's
+    // current position as start — which means every iteration of
     // getPathFromPath's "chain" begins from the bot's same real
     // location and produces the same ~296y partial path. The chain
-    // never advances. With explicit start, each step extends from the
-    // previous step's endpoint, giving the 40-attempt walker its
-    // intended multi-tile reach. Cmangos passes start explicitly too
-    // (WorldPosition.cpp:962 — pathfinder->calculate(start, end)).
+    // never advances. With explicit start, each step extends from
+    // the previous step's endpoint, giving the 40-attempt walker
+    // its intended multi-tile reach.
     PathGenerator path(pathUnit);
     path.CalculatePath(startPos.GetPositionX(), startPos.GetPositionY(), startPos.GetPositionZ(),
                        GetPositionX(), GetPositionY(), GetPositionZ(), false);

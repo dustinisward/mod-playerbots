@@ -111,12 +111,11 @@ bool NewRpgBaseAction::MoveFarTo(WorldPosition dest)
         }
     }
 
-    // 10% lastPath reuse (cmangos MovementActions.cpp:687-689). If
-    // the cached path's endpoint is within 10% of the new dest's
-    // distance AND the bot is still mid-flight toward it, skip the
-    // chained-probe recompute entirely. The 10y guard ensures we
-    // don't reuse a finished path (where the bot has already
-    // arrived at the cached endpoint).
+    // 10% lastPath reuse. If the cached path's endpoint is within
+    // 10% of the new dest's distance AND the bot is still mid-flight
+    // toward it, skip the chained-probe recompute entirely. The 10y
+    // guard ensures we don't reuse a finished path (where the bot
+    // has already arrived at the cached endpoint).
     {
         LastMovement& lastMove = AI_VALUE(LastMovement&, "last movement");
         if (!lastMove.lastPath.empty())
@@ -136,35 +135,31 @@ bool NewRpgBaseAction::MoveFarTo(WorldPosition dest)
     float disToDest = bot->GetDistance(dest);
     float dis = bot->GetExactDist(dest);
 
-    // Mirrors cmangos-playerbots' ResolveMovePath / getFullPath flow:
+    // Decision tree:
     //
     //   1. Active node plan? Ride it. The plan executor owns its own
     //      per-step transitions (walk/flight/transport/teleport).
     //
-    //   2. Otherwise, run the same 40-step chained mmap probe that
-    //      cmangos uses everywhere (TravelMgr.cpp:760, ported in PR
-    //      #2312 onto WorldPosition). It chains PathGenerator calls
-    //      across navmesh tiles so it reaches destinations far beyond
-    //      a single PathGenerator's ~296y smooth-path cap.
+    //   2. Otherwise, run the 40-step chained mmap probe. It chains
+    //      PathGenerator calls across navmesh tiles so it reaches
+    //      destinations far beyond a single PathGenerator's ~296y
+    //      smooth-path cap.
     //
-    //   3. Probe lands within spellDistance of dest AND move is "long"
-    //      (>= nodeFirstDis): use mmap, skip the node graph. This is
-    //      cmangos's TravelNode.cpp:1894 short-circuit — and the fix
-    //      for the cave-quest case (when mmap CAN route into the
-    //      cave from current position, prefer that over the cached
-    //      surface-node detour).
+    //   3. Probe lands within spellDistance of dest AND move is
+    //      "long" (>= nodeFirstDis): use mmap, skip the node graph.
+    //      Fixes cases where mmap CAN route to the destination and
+    //      we'd otherwise commit to a cached surface-node detour.
     //
     //   4. Probe didn't reach AND move is long: commit to the
     //      travel-node plan (graph A* + flights + transports).
     //
     //   5. Otherwise: walk to the probe's furthest reachable point.
     //      Empty / non-progressing probe falls back to a best-effort
-    //      spline at the destination (cmangos line 720: addPoint).
-    //      Stuck-recovery (above) handles oscillation.
+    //      spline at the destination.
     //
-    // No cone / random-direction sampling — cmangos doesn't do it and
-    // it tends to walk bots into geometry on the way to "stepping
-    // stones" that aren't on the actual route.
+    // No cone / random-direction sampling — it tends to walk bots
+    // into geometry on the way to "stepping stones" that aren't on
+    // the actual route.
     bool tryNodes = (dis >= nodeFirstDis && sPlayerbotAIConfig.enableTravelNodes);
 
     // Loop-breaker: count recent attempts of each strategy to this
@@ -205,12 +200,11 @@ bool NewRpgBaseAction::MoveFarTo(WorldPosition dest)
     if (tryNodes && !forceMmapOverNodes && !bothExhausted && botAI->rpgInfo.HasActiveTravelPlan())
         return UpdateTravelPlan();
 
-    // 40-step chained mmap probe (cmangos getPathFromPath, ported in
-    // PR #2312 at TravelMgr.cpp:760). Heavier than a single
-    // GeneratePath call but matches cmangos's "same effort" baseline
-    // — chains PathGenerator calls across multiple navmesh tiles so
-    // it can reach destinations far beyond a single PathGenerator's
-    // ~296y smooth-path cap.
+    // 40-step chained mmap probe (WorldPosition::getPathFromPath in
+    // TravelMgr.cpp). Heavier than a single GeneratePath call but
+    // chains PathGenerator across multiple navmesh tiles so it can
+    // reach destinations far beyond one PathGenerator's ~296y
+    // smooth-path cap.
     WorldPosition botPos(bot);
     std::vector<WorldPosition> probe = botPos.getPathTo(dest, bot);
     bool probeReachesDest = dest.isPathTo(probe, sPlayerbotAIConfig.spellDistance);
@@ -221,8 +215,7 @@ bool NewRpgBaseAction::MoveFarTo(WorldPosition dest)
     {
         // Long-distance move and either mmap couldn't get within
         // spellDistance OR we're forcing nodes after 3 failed mmap
-        // loops — commit to the travel-node graph
-        // (cmangos TravelNode.cpp:1907 buildPath branch).
+        // loops — commit to the travel-node graph.
         StartTravelPlan(dest);
         if (botAI->rpgInfo.HasActiveTravelPlan())
         {
@@ -251,13 +244,12 @@ bool NewRpgBaseAction::MoveFarTo(WorldPosition dest)
         botAI->rpgInfo.ClearTravel();
     }
 
-    // Walk the chained probe's full waypoint chain via MoveSplinePath
-    // — cmangos's DispatchMovement pattern (MovementActions.cpp:1014:
-    // mm.MovePath(pointPath, moveMode, false)). Handing the FULL
-    // waypoint vector to the motion master removes its discretion
-    // to introduce a straight-line shortcut between intermediate
-    // points (which is what produced the diagonal-through-air bug
-    // when we used MoveTo(endpoint) and let the motion master replan).
+    // Walk the chained probe's full waypoint chain via MoveSplinePath.
+    // Handing the full waypoint vector to the motion master removes
+    // its discretion to introduce a straight-line shortcut between
+    // intermediate points — that shortcut produced the diagonal-
+    // through-air bug when we used MoveTo(endpoint) and let the
+    // motion master replan.
     // Skip when both routing strategies have failed 3 times each.
     if (!probe.empty() && !bothExhausted && probe.size() >= 2)
     {
@@ -272,7 +264,7 @@ bool NewRpgBaseAction::MoveFarTo(WorldPosition dest)
             for (auto const& wp : probe)
                 points.emplace_back(wp.GetPositionX(), wp.GetPositionY(), wp.GetPositionZ());
 
-            // Per-waypoint Z-snap (cmangos DispatchMovement:1006).
+            // Per-waypoint Z-snap to current ground.
             for (auto& pt : points)
                 bot->UpdateAllowedPositionZ(pt.x, pt.y, pt.z);
 
@@ -300,12 +292,12 @@ bool NewRpgBaseAction::MoveFarTo(WorldPosition dest)
 
             if (points.size() >= 2)
             {
-                // No-worse lastPath reuse (cmangos MovementActions.cpp:716-717).
-                // If the cached path's endpoint is no further from
-                // dest than this new probe's, prefer cached to
-                // prevent path-swapping mid-walk. Same 10y guard as
-                // the top-of-MoveFarTo reuse to avoid reusing a
-                // finished path the bot already arrived at.
+                // No-worse lastPath reuse. If the cached path's
+                // endpoint is no further from dest than this new
+                // probe's, prefer cached to prevent path-swapping
+                // mid-walk. Same 10y guard as the top-of-MoveFarTo
+                // reuse to avoid reusing a finished path the bot
+                // already arrived at.
                 {
                     LastMovement& lastMove = AI_VALUE(LastMovement&, "last movement");
                     if (!lastMove.lastPath.empty())
@@ -362,8 +354,7 @@ bool NewRpgBaseAction::MoveFarTo(WorldPosition dest)
                     MovementPriority::MOVEMENT_NORMAL);
 
                 // Cache dispatched waypoints so the next MoveFarTo
-                // tick can satisfy the 10% / no-worse reuse checks
-                // (cmangos MovementActions.cpp:687, 716).
+                // tick can satisfy the 10% / no-worse reuse checks.
                 std::vector<WorldPosition> wpts;
                 wpts.reserve(points.size());
                 for (auto const& pt : points)
@@ -375,10 +366,10 @@ bool NewRpgBaseAction::MoveFarTo(WorldPosition dest)
         }
     }
 
-    // cmangos MovementActions.cpp:720 — empty / non-progressing path
-    // falls back to dispatching the destination as a single waypoint.
-    // Best-effort spline; UnstuckAction (5/10 min) is the eventual
-    // catch if this loops forever.
+    // Empty / non-progressing path falls back to dispatching the
+    // destination as a single waypoint. Best-effort spline;
+    // UnstuckAction (5/10 min) is the eventual catch if this loops
+    // forever.
     LOG_INFO("playerbots", "[MoveFar] {} spline | dest=({:.0f},{:.0f},{:.0f}) | dis={:.0f} | probe.empty={} | mmapFails={} nodeFails={} | flags={}{}{}",
         bot->GetName(), dest.GetPositionX(), dest.GetPositionY(), dest.GetPositionZ(), dis,
         probe.empty() ? "y" : "n",
@@ -444,13 +435,11 @@ bool NewRpgBaseAction::MoveWorldObjectTo(ObjectGuid guid, float distance)
         y = object->GetPositionY();
         z = object->GetPositionZ();
     }
-    // Delegate to MoveFarTo so every approach gets the cmangos-aligned
-    // chained mmap probe + spellDistance shortcut + travel-node
-    // fallback, instead of a single direct MoveTo. The debug-move
-    // trace then labels the actual mechanism (spline / mmap /
-    // nodetravel) rather than a generic "MoveWorldObjectTo:spline".
-    // (cmangos: refactor(Move): Route MoveWorldObjectTo through
-    // MoveFarTo — 4cb3abab.)
+    // Delegate to MoveFarTo so every approach gets the chained mmap
+    // probe + spellDistance shortcut + travel-node fallback instead
+    // of a single direct MoveTo. The debug-move trace then labels
+    // the actual mechanism (spline / mmap / nodetravel) rather than
+    // a generic "MoveWorldObjectTo:spline".
     return MoveFarTo(WorldPosition(object->GetMapId(), x, y, z));
 }
 

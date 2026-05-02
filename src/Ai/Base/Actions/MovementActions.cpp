@@ -3233,15 +3233,14 @@ bool MovementAction::LaunchWalkSpline(TravelPlan& state)
     }
 
     // Re-clamp cached waypoints to current valid Z. Rows in
-    // playerbots_travelnode_path store absolute coords baked at offline
-    // generation; if the live navmesh has shifted since (mmap regen,
-    // terrain change, vmap update), the stored z can be above ground —
-    // MoveSplinePath plays back coords verbatim and the bot looks like
-    // it's walking through the air. UpdateAllowedPositionZ is the same
-    // per-waypoint snap cmangos-playerbots applies in DispatchMovement
-    // (MovementActions.cpp:1006); it factors mmap polygon Z, water
-    // surface, swimming, flying and transport state, so cave floors
-    // above the terrain plane snap correctly.
+    // playerbots_travelnode_path store absolute coords baked at
+    // offline generation; if the live navmesh has shifted since
+    // (mmap regen, terrain change, vmap update), the stored z can
+    // be above ground — MoveSplinePath plays back coords verbatim
+    // and the bot looks like it's walking through the air.
+    // UpdateAllowedPositionZ factors mmap polygon Z, water surface,
+    // swimming, flying and transport state, so cave floors above
+    // the terrain plane snap correctly.
     for (auto& pt : state.walkPoints)
         bot->UpdateAllowedPositionZ(pt.x, pt.y, pt.z);
 
@@ -3308,8 +3307,7 @@ bool MovementAction::LaunchWalkSpline(TravelPlan& state)
             bot->GetOrientation(), delay, MovementPriority::MOVEMENT_NORMAL);
 
         // Cache the dispatched waypoint chain so MoveFarTo's 10%
-        // lastPath reuse (cmangos MovementActions.cpp:687) and the
-        // "no worse" reuse (line 716) can pick it up next tick.
+        // lastPath reuse and "no worse" reuse can pick it up next tick.
         std::vector<WorldPosition> wpts;
         wpts.reserve(state.walkPoints.size());
         for (auto const& pt : state.walkPoints)
@@ -3477,9 +3475,8 @@ bool MovementAction::ExecuteTravelPlan(TravelPlan& state)
             }
 
             // Too far from first point — abort the plan and let the
-            // caller's stuck-recovery decide what to do. (cmangos
-            // doesn't teleport here either; an abandoned plan is
-            // recovered by the next MoveFarTo cycle.)
+            // caller's stuck-recovery decide what to do. An abandoned
+            // plan is recovered by the next MoveFarTo cycle.
             if (state.walkPoints.size() >= 2)
             {
                 G3D::Vector3 const& first = state.walkPoints.front();
@@ -3528,8 +3525,7 @@ bool MovementAction::ExecuteTravelPlan(TravelPlan& state)
 
             // At portal but didn't cross — natural collision missed.
             // Abort the plan; stuck-recovery in MoveFarTo will decide
-            // whether to retry or teleport the bot. (cmangos doesn't
-            // teleport here either.)
+            // whether to retry or teleport the bot.
             state.Reset();
             return false;
         }
@@ -3665,10 +3661,10 @@ bool MovementAction::ExecuteTravelPlan(TravelPlan& state)
 
         case PathNodeType::NODE_FLYING_MOUNT:
         {
-            // Flying-mount node not implemented — abort. cmangos
-            // produces these nodes during graph generation but their
-            // execution is server-specific; we treat them as
-            // unreachable rather than papering over with a teleport.
+            // Flying-mount node not implemented — abort. The graph
+            // generator produces these but their execution is
+            // server-specific; we treat them as unreachable rather
+            // than papering over with a teleport.
             state.Reset();
             return false;
         }

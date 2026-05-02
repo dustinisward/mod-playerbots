@@ -292,12 +292,12 @@ public:
 
     std::vector<WorldPosition> getPathTo(WorldPosition endPos, Unit* bot) { return endPos.getPathFrom(*this, bot); }
 
-    // Cmangos-aligned (WorldPosition.h:317): the path "reaches" this
-    // position when its last point is on the same map, within
-    // maxDistance horizontally, and within maxZDistance vertically.
-    // 3D Euclidean distance would falsely accept paths that end the
-    // right horizontal distance from us but on a roof/floor below.
-    // maxDistance == 0 falls back to targetPosRecalcDistance (0.1y).
+    // The path "reaches" this position when its last point is on
+    // the same map, within maxDistance horizontally, and within
+    // maxZDistance vertically. 3D Euclidean distance would falsely
+    // accept paths that end the right horizontal distance from us
+    // but on a roof/floor below. maxDistance == 0 falls back to
+    // targetPosRecalcDistance (0.1y).
     bool isPathTo(std::vector<WorldPosition> const& path, float const maxDistance = 0.0f,
                   float const maxZDistance = 2.0f) const
     {
