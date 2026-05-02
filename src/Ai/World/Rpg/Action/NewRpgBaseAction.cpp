@@ -168,6 +168,13 @@ bool NewRpgBaseAction::MoveFarTo(WorldPosition dest)
         StartTravelPlan(dest);
         if (botAI->rpgInfo.HasActiveTravelPlan())
         {
+            LOG_INFO("playerbots", "[MoveFar] {} nodetravel | dest=({:.0f},{:.0f},{:.0f}) | dis={:.0f} | mmapFails={} nodeFails={} | flags={}{}{}",
+                bot->GetName(), dest.GetPositionX(), dest.GetPositionY(), dest.GetPositionZ(), dis,
+                botAI->rpgInfo.CountRecentAttempts(dest, false),
+                botAI->rpgInfo.CountRecentAttempts(dest, true),
+                forceMmapOverNodes ? "F-mmap " : "",
+                forceNodesOverMmap ? "F-nodes " : "",
+                bothExhausted ? "EXHAUST " : "");
             // Fire once on plan start so the user sees nodetravel as
             // the chosen strategy. Per-step labels
             // (TravelPlan:walk/segment/...) continue from the executor.
@@ -202,6 +209,14 @@ bool NewRpgBaseAction::MoveFarTo(WorldPosition dest)
             stepDest.GetPositionY(), stepDest.GetPositionZ());
         if (endDistToDest + 5.0f < disToDest)
         {
+            LOG_INFO("playerbots", "[MoveFar] {} mmap | dest=({:.0f},{:.0f},{:.0f}) | dis={:.0f} | end=({:.0f},{:.0f},{:.0f}) endDist={:.0f} | mmapFails={} nodeFails={} | flags={}{}{}",
+                bot->GetName(), dest.GetPositionX(), dest.GetPositionY(), dest.GetPositionZ(), dis,
+                stepDest.GetPositionX(), stepDest.GetPositionY(), stepDest.GetPositionZ(), endDistToDest,
+                botAI->rpgInfo.CountRecentAttempts(dest, false),
+                botAI->rpgInfo.CountRecentAttempts(dest, true),
+                forceMmapOverNodes ? "F-mmap " : "",
+                forceNodesOverMmap ? "F-nodes " : "",
+                bothExhausted ? "EXHAUST " : "");
             EmitDebugMove("MoveFar:mmap",
                           stepDest.GetPositionX(), stepDest.GetPositionY(), stepDest.GetPositionZ());
             botAI->rpgInfo.RecordMoveFarAttempt(dest, /*wasNodeTravel=*/false);
@@ -214,6 +229,14 @@ bool NewRpgBaseAction::MoveFarTo(WorldPosition dest)
     // falls back to dispatching the destination as a single waypoint.
     // Best-effort spline; UnstuckAction (5/10 min) is the eventual
     // catch if this loops forever.
+    LOG_INFO("playerbots", "[MoveFar] {} spline | dest=({:.0f},{:.0f},{:.0f}) | dis={:.0f} | probe.empty={} | mmapFails={} nodeFails={} | flags={}{}{}",
+        bot->GetName(), dest.GetPositionX(), dest.GetPositionY(), dest.GetPositionZ(), dis,
+        probe.empty() ? "y" : "n",
+        botAI->rpgInfo.CountRecentAttempts(dest, false),
+        botAI->rpgInfo.CountRecentAttempts(dest, true),
+        forceMmapOverNodes ? "F-mmap " : "",
+        forceNodesOverMmap ? "F-nodes " : "",
+        bothExhausted ? "EXHAUST " : "");
     EmitDebugMove("MoveFar:spline",
                   dest.GetPositionX(), dest.GetPositionY(), dest.GetPositionZ());
     botAI->rpgInfo.RecordMoveFarAttempt(dest, /*wasNodeTravel=*/false);
