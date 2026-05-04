@@ -38,7 +38,7 @@ mmapsConfig:
 
     # Maximum slope angle (in degrees) NPCs can walk on.
     # Surfaces steeper than this will be considered unwalkable.
-    walkableSlopeAngle: 48
+    walkableSlopeAngle: 50
 
     # --- Cell Size Calculation ---
     # Many parameters below are defined in "cell units".
@@ -81,7 +81,7 @@ mmapsConfig:
     # 2000 resolution. Preserves the 1.60 yd world-unit step. The mmap
     # is shared with every creature, NPC patrol, escort, and quest mob;
     # tightening below stock breaks patrols that cross 1.5y ledges.
-    walkableClimb: 6
+    walkableClimb: 4
 
     # Minimum distance (in cell units) around walkable surfaces.
     # Helps prevent NPCs from clipping into walls and narrow gaps.
