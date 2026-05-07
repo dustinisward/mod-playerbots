@@ -19,6 +19,7 @@
 #include "BattlegroundMgr.h"
 #include "ChannelMgr.h"
 #include "Chat.h"
+#include "Config.h"
 #include "DBCStores.h"
 #include "DBCStructure.h"
 #include "DatabaseEnv.h"
@@ -3175,8 +3176,25 @@ void RandomPlayerbotMgr::OnBotLoginInternal(Player* const bot)
         }
     }
 
-    // Run guild recovery/assignment at login to handle empty guild tables after restart.
-    if (sPlayerbotAIConfig.randomBotGuildCount > 0)
+    // [WoWZoW SOAP-perf 2026-05-06 night] Skip per-login InitGuild for already-guilded
+    // bots AND when EnableInitGuildOnLogin is false (default false in this fork).
+    //
+    // liyunfan-merge added an unconditional `InitGuild()` call here to "handle empty
+    // guild tables after restart". On our 15K-character pool with 96.5% guildless
+    // (15,137 of 15,684), this fires `AssignToGuild` → `AddMember` (DB writes) for
+    // ~580 of the 600 bots that log in at boot. Combined with mod-playerbots'
+    // `RandomBotsPerInterval = 30 / 5s`, the world thread becomes saturated for
+    // 15+ minutes after boot, and the (now-multi-threaded) ACSoap listener queues
+    // SOAP commands that take minutes to drain.
+    //
+    // We have 12 stable guilds with members already; this defensive recovery code
+    // is not needed in normal operation. Pre-liyunfan code didn't have this block
+    // and worked fine. Re-enable only when explicitly needed (set
+    // AiPlayerbot.EnableInitGuildOnLogin = 1 in playerbots.conf).
+    //
+    // See `Server/matrix/docs/SOAP_INITGUILD_BOTTLENECK_SCOPING.md` for full rationale.
+    if (sPlayerbotAIConfig.randomBotGuildCount > 0 && !bot->GetGuildId() &&
+        sConfigMgr->GetOption<bool>("AiPlayerbot.EnableInitGuildOnLogin", false))
     {
         PlayerbotFactory factory(bot, bot->GetLevel());
         factory.InitGuild();
