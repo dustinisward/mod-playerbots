@@ -2709,7 +2709,7 @@ void TravelMgr::LoadQuestTravelTable()
                 if (!preloadUnlinkedPaths && !startNode->hasLinkTo(endNode))
                     continue;
 
-                if (startNode->getMapId() != endNode->getMapId())
+                if (startNode->GetMapId() != endNode->GetMapId())  // O9 merge: getMapId -> GetMapId
                     continue;
 
                 //if (preloadUnlinkedPaths && !startNode->hasLinkTo(endNode) && startNode->isUselessLink(endNode))

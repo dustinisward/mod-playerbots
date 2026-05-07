@@ -3,6 +3,12 @@
  * and/or modify it under version 3 of the License, or (at your option), any later version.
  */
 
+// O9 merge (2026-05-06): liyunfan added #include "MapMgr.h" which uses M_PI;
+// MSVC needs _USE_MATH_DEFINES set BEFORE any standard math header so <cmath>
+// exposes M_PI to the chain that follows.
+#define _USE_MATH_DEFINES
+#include <cmath>
+
 #include "TravelNode.h"
 
 #include <array>
