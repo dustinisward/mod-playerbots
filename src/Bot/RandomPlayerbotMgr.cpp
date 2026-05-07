@@ -18,12 +18,15 @@
 #include "Battleground.h"
 #include "BattlegroundMgr.h"
 #include "ChannelMgr.h"
+#include "Chat.h"
 #include "DBCStores.h"
 #include "DBCStructure.h"
 #include "DatabaseEnv.h"
 #include "Define.h"
 #include "FleeManager.h"
 #include "GridNotifiers.h"
+#include "Group.h"
+#include "GroupMgr.h"
 #include "LFGMgr.h"
 #include "MapMgr.h"
 #include "NewRpgInfo.h"
@@ -2395,6 +2398,638 @@ bool RandomPlayerbotMgr::HandlePlayerbotConsoleCommand(ChatHandler* handler, cha
         return true;
     }
 
+    // FIX (WoWZoW): "add <name>" and "remove <name>" must be handled BEFORE
+    // the prefix-matching machinery below. The original code put these
+    // checks INSIDE the for-loop over the `handlers` map, which only enters
+    // its body when the cmd starts with one of init/clear/levelup/refresh/
+    // teleport/revive/grind/change_strategy. "add" doesn't match any of those
+    // prefixes, so the body never ran and `add Pythe` returned true silently
+    // without doing anything. Worse: even if the loop had been reached, the
+    // botIds builder requires `FindPlayer(guid) != null` (i.e. bot already
+    // online), which makes "add" tautological — you can't add a bot that's
+    // not yet online via that path. Bringing them up here, before any of
+    // that, makes `add` actually work for offline characters.
+    if (cmd.find("add ") == 0)
+    {
+        std::string name = cmd.substr(4);
+        ObjectGuid guid = sCharacterCache->GetCharacterGuidByName(name);
+        if (!guid)
+        {
+            LOG_ERROR("playerbots", "Character {} not found", name.c_str());
+            return false;
+        }
+        sRandomPlayerbotMgr.AddPlayerBot(guid, 0);
+        LOG_INFO("playerbots", "Added bot {}", name.c_str());
+        return true;
+    }
+
+    if (cmd.find("remove ") == 0)
+    {
+        std::string name = cmd.substr(7);
+        ObjectGuid guid = sCharacterCache->GetCharacterGuidByName(name);
+        if (!guid)
+        {
+            LOG_ERROR("playerbots", "Character {} not found", name.c_str());
+            return false;
+        }
+        sRandomPlayerbotMgr.LogoutPlayerBot(guid);
+        LOG_INFO("playerbots", "Removed bot {}", name.c_str());
+        return true;
+    }
+
+    // FIXIT W22 (WoWZoW 2026-05-05): make a named bot speak in /say.
+    // Form: `playerbots rndbot say <name> <message>`. The earlier patch
+    // attempt added a `say` handler in PlayerbotAI::HandleRemoteCommand
+    // (line 5290), but that path is not reachable from SOAP — SOAP only
+    // exposes the console-command tree, which routes through HERE. So the
+    // working W22 patch lives here, not in HandleRemoteCommand. Pythe's
+    // trade_chat.py uses this to post curated /2 lines from random bots.
+    if (cmd.find("say ") == 0)
+    {
+        std::string rest = cmd.substr(4);
+        size_t sep = rest.find(' ');
+        if (sep == std::string::npos)
+        {
+            LOG_ERROR("playerbots", "Usage: rndbot say <name> <message>");
+            return false;
+        }
+        std::string botname = rest.substr(0, sep);
+        std::string msg = rest.substr(sep + 1);
+        ObjectGuid guid = sCharacterCache->GetCharacterGuidByName(botname);
+        if (!guid)
+        {
+            LOG_ERROR("playerbots", "Character {} not found", botname.c_str());
+            return false;
+        }
+        Player* bot = ObjectAccessor::FindPlayer(guid);
+        if (!bot)
+        {
+            LOG_ERROR("playerbots", "Bot {} not online", botname.c_str());
+            return false;
+        }
+        bot->Say(msg, LANG_UNIVERSAL);
+        LOG_INFO("playerbots", "[say] {}: {}", botname.c_str(), msg.c_str());
+        return true;
+    }
+
+    // FIXIT W22-Patch1b (WoWZoW 2026-05-06): make a named bot speak in
+    // the global /2 Trade channel. This is the architecturally correct
+    // path that the original `say` patch couldn't take — `Player::Say()`
+    // builds a CHAT_MSG_SAY packet routed by spatial visibility and
+    // never carries a channel-name string, so the 3.3.5a client renders
+    // it in /say not /2 Trade. This handler builds a real
+    // CHAT_MSG_CHANNEL packet via `ChatHandler::BuildChatPacket` and
+    // fans out via `Channel::SendToAll`. The bot does NOT need to be a
+    // member of the channel — `SendToAll` walks `Channel::playersStore`
+    // which is the channel manager's own membership list, not the
+    // bot's. Players currently in the channel see the message exactly
+    // as if the bot had typed it. Form:
+    //   `playerbots rndbot tradechat <bot_name> <message>`
+    // Falls back to `bot->Say()` if the channel isn't found (shouldn't
+    // happen for online bots but harmless if it does).
+    if (cmd.find("tradechat ") == 0)
+    {
+        std::string rest = cmd.substr(10);
+        size_t sep = rest.find(' ');
+        if (sep == std::string::npos)
+        {
+            LOG_ERROR("playerbots",
+                "Usage: rndbot tradechat <bot> <message>");
+            return false;
+        }
+        std::string botname = rest.substr(0, sep);
+        std::string msg = rest.substr(sep + 1);
+
+        ObjectGuid bguid = sCharacterCache->GetCharacterGuidByName(botname);
+        if (!bguid)
+        {
+            LOG_ERROR("playerbots", "rndbot tradechat: bot {} not found",
+                      botname.c_str());
+            return false;
+        }
+        Player* bot = ObjectAccessor::FindPlayer(bguid);
+        if (!bot)
+        {
+            LOG_ERROR("playerbots", "rndbot tradechat: bot {} not online",
+                      botname.c_str());
+            return false;
+        }
+        // The bot must have a session (bots without sessions can't be
+        // routed through; degraded states like corpse/teleporting are
+        // fine for the channel as long as the session pointer exists).
+        if (!bot->GetSession())
+        {
+            LOG_ERROR("playerbots", "rndbot tradechat: bot {} has no session",
+                      botname.c_str());
+            return false;
+        }
+
+        // Resolve the per-faction Trade channel manager. WotLK has
+        // separate Alliance / Horde / Sanctuary instances of "Trade -
+        // City"; ChannelMgr::forTeam(TeamId) picks the right one.
+        ChannelMgr* mgr = ChannelMgr::forTeam(bot->GetTeamId());
+        if (!mgr)
+        {
+            LOG_ERROR("playerbots",
+                "rndbot tradechat: no ChannelMgr for team {} (bot {})",
+                static_cast<int>(bot->GetTeamId()), botname.c_str());
+            return false;
+        }
+        // FIXIT W22-Patch1b locale fix (Gemini Topic 2 finding,
+        // 2026-05-06): hardcoded "Trade - City" only matches the
+        // enUS/enGB locale's Channel object. A non-English client
+        // (zhCN "交易 - 城市", ruRU "Торговля - Город", etc.) joins
+        // a different Channel instance keyed by their localized name
+        // — so spoofing into the English channel would skip them.
+        // The CANONICAL identifier is `Channel::GetChannelId() == 2`
+        // (the static WotLK Trade DBC id), which is locale-invariant.
+        // Iterate the team's channels for the one with id==2; fall
+        // back to the English string for backward compatibility on
+        // realms where the trade channel hasn't been auto-created yet
+        // (channelId = 0 on a freshly-spawned untracked channel).
+        Channel* ch = nullptr;
+        for (auto const& kv : mgr->GetChannels())
+        {
+            if (kv.second && kv.second->GetChannelId() == 2)
+            {
+                ch = kv.second;
+                break;
+            }
+        }
+        if (!ch)
+            ch = mgr->GetChannel("Trade - City", bot, false);
+        if (!ch)
+        {
+            // Fallback: degrade to /say so the curated content bank
+            // still lands somewhere visible. Logged so we know.
+            LOG_WARN("playerbots",
+                "rndbot tradechat: 'Trade - City' channel not found "
+                "for {}'s team — degrading to /say",
+                botname.c_str());
+            bot->Say(msg, LANG_UNIVERSAL);
+            LOG_INFO("playerbots", "[tradechat] {} (fallback /say): {}",
+                     botname.c_str(), msg.c_str());
+            return true;
+        }
+
+        // Channel::SpoofSay (Tier 2 core patch, also 2026-05-06): builds
+        // the CHAT_MSG_CHANNEL packet with the channel-name string and
+        // fans out via the channel's internal SendToAll. Bypasses the
+        // IsOn() membership check that gates regular Say(), so the bot
+        // doesn't need to formally JoinChannel (which would spam every
+        // member with MakeJoined announcements at our 2-msgs/min cadence).
+        ch->SpoofSay(bot->GetGUID(), msg, LANG_UNIVERSAL);
+
+        LOG_INFO("playerbots", "[tradechat] {}: {}",
+                 botname.c_str(), msg.c_str());
+        return true;
+    }
+
+    // FIXIT W9-1 (WoWZoW 2026-05-05): make a named bot perform an emote.
+    // Form: `playerbots rndbot emote <name> <emote_id>`. Numeric emote id
+    // (TextEmotes.dbc — e.g. 11=cheer, 4=bow, 18=lol, 71=dance, 264=salute).
+    // Used by Pythe.composer.crowd_emote and reactionary handlers.
+    if (cmd.find("emote ") == 0)
+    {
+        std::string rest = cmd.substr(6);
+        size_t sep = rest.find(' ');
+        if (sep == std::string::npos)
+        {
+            LOG_ERROR("playerbots", "Usage: rndbot emote <name> <emote_id>");
+            return false;
+        }
+        std::string botname = rest.substr(0, sep);
+        uint32 emoteId = static_cast<uint32>(atoi(rest.substr(sep + 1).c_str()));
+        if (emoteId == 0)
+        {
+            LOG_ERROR("playerbots", "rndbot emote: invalid emote_id");
+            return false;
+        }
+        ObjectGuid guid = sCharacterCache->GetCharacterGuidByName(botname);
+        if (!guid)
+        {
+            LOG_ERROR("playerbots", "Character {} not found", botname.c_str());
+            return false;
+        }
+        Player* bot = ObjectAccessor::FindPlayer(guid);
+        if (!bot)
+        {
+            LOG_ERROR("playerbots", "Bot {} not online", botname.c_str());
+            return false;
+        }
+        bot->HandleEmoteCommand(emoteId);
+        LOG_INFO("playerbots", "[emote] {} -> {}", botname.c_str(), emoteId);
+        return true;
+    }
+
+    // FIXIT W15 (WoWZoW 2026-05-05): real /whisper from a named bot.
+    // Form: `playerbots rndbot whisper <bot_name> <target_name> <message>`.
+    // Sends a true SMSG_MESSAGECHAT packet (yellow `[Pythe] whispers: ...`
+    // in the target's chat window, not a SOAP popup). Existing
+    // `Player::Whisper(text, language, target)` does all the heavy
+    // lifting; we just resolve sender + target by name.
+    if (cmd.find("whisper ") == 0)
+    {
+        std::string rest = cmd.substr(8);
+        size_t s1 = rest.find(' ');
+        if (s1 == std::string::npos)
+        {
+            LOG_ERROR("playerbots", "Usage: rndbot whisper <bot> <target> <message>");
+            return false;
+        }
+        std::string botname = rest.substr(0, s1);
+        std::string r2 = rest.substr(s1 + 1);
+        size_t s2 = r2.find(' ');
+        if (s2 == std::string::npos)
+        {
+            LOG_ERROR("playerbots", "Usage: rndbot whisper <bot> <target> <message>");
+            return false;
+        }
+        std::string targetname = r2.substr(0, s2);
+        std::string msg = r2.substr(s2 + 1);
+
+        ObjectGuid sguid = sCharacterCache->GetCharacterGuidByName(botname);
+        ObjectGuid tguid = sCharacterCache->GetCharacterGuidByName(targetname);
+        if (!sguid || !tguid)
+        {
+            LOG_ERROR("playerbots", "rndbot whisper: char not found ({}/{})",
+                      botname.c_str(), targetname.c_str());
+            return false;
+        }
+        Player* sender = ObjectAccessor::FindPlayer(sguid);
+        Player* target = ObjectAccessor::FindPlayer(tguid);
+        if (!sender || !target)
+        {
+            LOG_ERROR("playerbots", "rndbot whisper: sender/target offline ({}/{})",
+                      botname.c_str(), targetname.c_str());
+            return false;
+        }
+        sender->Whisper(msg, LANG_UNIVERSAL, target);
+        LOG_INFO("playerbots", "[whisper] {} -> {}: {}",
+                 botname.c_str(), targetname.c_str(), msg.c_str());
+        return true;
+    }
+
+    // FIXIT W18 (WoWZoW 2026-05-05): trivial dance shortcut. Equivalent to
+    // `rndbot emote <name> 71` but more readable. Form: `rndbot dance <name>`.
+    if (cmd.find("dance ") == 0)
+    {
+        std::string botname = cmd.substr(6);
+        ObjectGuid guid = sCharacterCache->GetCharacterGuidByName(botname);
+        if (!guid)
+        {
+            LOG_ERROR("playerbots", "Character {} not found", botname.c_str());
+            return false;
+        }
+        Player* bot = ObjectAccessor::FindPlayer(guid);
+        if (!bot)
+        {
+            LOG_ERROR("playerbots", "Bot {} not online", botname.c_str());
+            return false;
+        }
+        bot->HandleEmoteCommand(EMOTE_ONESHOT_DANCE);
+        LOG_INFO("playerbots", "[dance] {}", botname.c_str());
+        return true;
+    }
+
+    // FIXIT W17 (WoWZoW 2026-05-06): set a bot's master to a named player.
+    // Form: `playerbots rndbot setmaster <bot> <master>`. Mirrors the
+    // `botAI->SetMaster(inviter)` line at the end of AcceptInvitationAction
+    // (the canonical place a bot's master is sealed). Used by Pythe to take
+    // ownership of bots so subsequent strat / orders commands flow through
+    // the master-bound execution path. SetMaster(nullptr) is also valid
+    // (pass "none" or "release" as <master>).
+    if (cmd.find("setmaster ") == 0)
+    {
+        std::string rest = cmd.substr(10);
+        size_t sep = rest.find(' ');
+        if (sep == std::string::npos)
+        {
+            LOG_ERROR("playerbots", "Usage: rndbot setmaster <bot> <master|none>");
+            return false;
+        }
+        std::string botname = rest.substr(0, sep);
+        std::string mastername = rest.substr(sep + 1);
+
+        ObjectGuid bguid = sCharacterCache->GetCharacterGuidByName(botname);
+        if (!bguid)
+        {
+            LOG_ERROR("playerbots", "rndbot setmaster: bot {} not found",
+                      botname.c_str());
+            return false;
+        }
+        Player* bot = ObjectAccessor::FindPlayer(bguid);
+        if (!bot)
+        {
+            LOG_ERROR("playerbots", "rndbot setmaster: bot {} not online",
+                      botname.c_str());
+            return false;
+        }
+        PlayerbotAI* botAI = GET_PLAYERBOT_AI(bot);
+        if (!botAI)
+        {
+            LOG_ERROR("playerbots", "rndbot setmaster: {} has no PlayerbotAI",
+                      botname.c_str());
+            return false;
+        }
+
+        if (mastername == "none" || mastername == "release")
+        {
+            botAI->SetMaster(nullptr);
+            botAI->ResetStrategies();
+            LOG_INFO("playerbots", "[setmaster] {} -> (released)",
+                     botname.c_str());
+            return true;
+        }
+
+        ObjectGuid mguid = sCharacterCache->GetCharacterGuidByName(mastername);
+        if (!mguid)
+        {
+            LOG_ERROR("playerbots", "rndbot setmaster: master {} not found",
+                      mastername.c_str());
+            return false;
+        }
+        Player* master = ObjectAccessor::FindPlayer(mguid);
+        if (!master)
+        {
+            LOG_ERROR("playerbots", "rndbot setmaster: master {} not online",
+                      mastername.c_str());
+            return false;
+        }
+
+        botAI->SetMaster(master);
+        botAI->ResetStrategies();
+        LOG_INFO("playerbots", "[setmaster] {} -> {}",
+                 botname.c_str(), mastername.c_str());
+        return true;
+    }
+
+    // FIXIT W17 (WoWZoW 2026-05-06): change a single bot's strategy string.
+    // Form: `playerbots rndbot strat <bot> <state> <strategy>` where state is
+    // one of {combat,noncombat,dead}. The strategy follows mod-playerbots'
+    // existing +/- syntax (e.g. `+tank,-grind`). Wraps PlayerbotAI::
+    // ChangeStrategy(string, BotState). The existing dispatch-map
+    // `change_strategy` handler is misleadingly named — it teleports the bot
+    // to a different RPG location, not what we want.
+    if (cmd.find("strat ") == 0)
+    {
+        std::string rest = cmd.substr(6);
+        size_t s1 = rest.find(' ');
+        if (s1 == std::string::npos)
+        {
+            LOG_ERROR("playerbots",
+                "Usage: rndbot strat <bot> <combat|noncombat|dead> <strategy>");
+            return false;
+        }
+        std::string botname = rest.substr(0, s1);
+        std::string r2 = rest.substr(s1 + 1);
+        size_t s2 = r2.find(' ');
+        if (s2 == std::string::npos)
+        {
+            LOG_ERROR("playerbots",
+                "Usage: rndbot strat <bot> <combat|noncombat|dead> <strategy>");
+            return false;
+        }
+        std::string statename = r2.substr(0, s2);
+        std::string strategy = r2.substr(s2 + 1);
+
+        BotState state;
+        if (statename == "combat") state = BOT_STATE_COMBAT;
+        else if (statename == "noncombat") state = BOT_STATE_NON_COMBAT;
+        else if (statename == "dead") state = BOT_STATE_DEAD;
+        else
+        {
+            LOG_ERROR("playerbots",
+                "rndbot strat: state must be combat|noncombat|dead, got '{}'",
+                statename.c_str());
+            return false;
+        }
+
+        ObjectGuid bguid = sCharacterCache->GetCharacterGuidByName(botname);
+        if (!bguid)
+        {
+            LOG_ERROR("playerbots", "rndbot strat: bot {} not found",
+                      botname.c_str());
+            return false;
+        }
+        Player* bot = ObjectAccessor::FindPlayer(bguid);
+        if (!bot)
+        {
+            LOG_ERROR("playerbots", "rndbot strat: bot {} not online",
+                      botname.c_str());
+            return false;
+        }
+        PlayerbotAI* botAI = GET_PLAYERBOT_AI(bot);
+        if (!botAI)
+        {
+            LOG_ERROR("playerbots", "rndbot strat: {} has no PlayerbotAI",
+                      botname.c_str());
+            return false;
+        }
+
+        botAI->ChangeStrategy(strategy, state);
+        LOG_INFO("playerbots", "[strat] {} ({}): {}",
+                 botname.c_str(), statename.c_str(), strategy.c_str());
+        return true;
+    }
+
+    // FIXIT W17 (WoWZoW 2026-05-06): programmatically invite a bot into a
+    // player's group, creating the group if none exists, and seal the master
+    // relationship. Form: `playerbots rndbot groupinvite <leader> <bot>`.
+    // Mirrors the AcceptInvitationAction flow (see
+    // src/Ai/Base/Actions/AcceptInvitationAction.cpp): create-or-reuse the
+    // leader's Group, AddInvite(bot), trigger HandleGroupAcceptOpcode on the
+    // bot's session, then SetMaster + a sane default strategy so the bot
+    // physically follows. Bot must be online; leader can be any player char
+    // (Pythe in our use case). Idempotent: if bot already in leader's group
+    // we just refresh master + strategy.
+    if (cmd.find("groupinvite ") == 0)
+    {
+        std::string rest = cmd.substr(12);
+        size_t sep = rest.find(' ');
+        if (sep == std::string::npos)
+        {
+            LOG_ERROR("playerbots", "Usage: rndbot groupinvite <leader> <bot>");
+            return false;
+        }
+        std::string ldrname = rest.substr(0, sep);
+        std::string botname = rest.substr(sep + 1);
+
+        ObjectGuid lguid = sCharacterCache->GetCharacterGuidByName(ldrname);
+        ObjectGuid bguid = sCharacterCache->GetCharacterGuidByName(botname);
+        if (!lguid || !bguid)
+        {
+            LOG_ERROR("playerbots",
+                "rndbot groupinvite: char not found ({}/{})",
+                ldrname.c_str(), botname.c_str());
+            return false;
+        }
+        Player* leader = ObjectAccessor::FindPlayer(lguid);
+        Player* bot    = ObjectAccessor::FindPlayer(bguid);
+        if (!leader || !bot)
+        {
+            LOG_ERROR("playerbots",
+                "rndbot groupinvite: leader/bot offline ({}/{})",
+                ldrname.c_str(), botname.c_str());
+            return false;
+        }
+
+        // If bot is already in leader's group, just refresh master + strat.
+        Group* lgroup = leader->GetGroup();
+        if (lgroup && lgroup->IsMember(bot->GetGUID()))
+        {
+            if (PlayerbotAI* botAI = GET_PLAYERBOT_AI(bot))
+            {
+                botAI->SetMaster(leader);
+                botAI->ResetStrategies();
+                botAI->ChangeStrategy("+follow,-lfg,-bg",
+                                      BOT_STATE_NON_COMBAT);
+            }
+            LOG_INFO("playerbots", "[groupinvite] {} -> {} (already grouped)",
+                     ldrname.c_str(), botname.c_str());
+            return true;
+        }
+
+        // Bot must be available to invite (not in another group).
+        if (bot->GetGroup())
+        {
+            LOG_ERROR("playerbots",
+                "rndbot groupinvite: bot {} already in another group",
+                botname.c_str());
+            return false;
+        }
+
+        // Same-faction check — WoW groups are faction-locked outside CFBG.
+        if (leader->GetTeamId() != bot->GetTeamId())
+        {
+            LOG_ERROR("playerbots",
+                "rndbot groupinvite: faction mismatch ({} vs {})",
+                ldrname.c_str(), botname.c_str());
+            return false;
+        }
+
+        // Create the leader's group if needed.
+        if (!lgroup)
+        {
+            lgroup = new Group();
+            if (!lgroup->Create(leader))
+            {
+                delete lgroup;
+                LOG_ERROR("playerbots",
+                    "rndbot groupinvite: failed to Create() group for {}",
+                    ldrname.c_str());
+                return false;
+            }
+            sGroupMgr->AddGroup(lgroup);
+        }
+
+        // Group cap check (5 for party, 40 for raid).
+        if (lgroup->IsFull())
+        {
+            LOG_ERROR("playerbots",
+                "rndbot groupinvite: leader {}'s group is full",
+                ldrname.c_str());
+            return false;
+        }
+
+        // Mirror the Player::Invite flow: AddInvite then trigger the bot's
+        // accept-opcode (the same code path AcceptInvitationAction takes).
+        if (!lgroup->AddInvite(bot))
+        {
+            LOG_ERROR("playerbots",
+                "rndbot groupinvite: AddInvite failed for {}",
+                botname.c_str());
+            return false;
+        }
+
+        WorldPacket p;
+        uint32 roles_mask = 0;
+        p << roles_mask;
+        bot->GetSession()->HandleGroupAcceptOpcode(p);
+
+        if (!bot->GetGroup() || !bot->GetGroup()->IsMember(leader->GetGUID()))
+        {
+            LOG_ERROR("playerbots",
+                "rndbot groupinvite: bot {} did not end up in leader's group",
+                botname.c_str());
+            return false;
+        }
+
+        if (PlayerbotAI* botAI = GET_PLAYERBOT_AI(bot))
+        {
+            botAI->SetMaster(leader);
+            botAI->ResetStrategies();
+            botAI->ChangeStrategy("+follow,-lfg,-bg", BOT_STATE_NON_COMBAT);
+            botAI->Reset();
+        }
+
+        LOG_INFO("playerbots", "[groupinvite] {} -> {} ok",
+                 ldrname.c_str(), botname.c_str());
+        return true;
+    }
+
+    // N25 / O4 descope (W9-3): coord-precise teleport for any character.
+    // Form: `playerbots rndbot tele_xyz <bot> <map> <x> <y> <z>`. Resolves
+    // the target by name, then calls Player::TeleportTo preserving the
+    // current orientation. Tier 1, no AI override needed (this is a hard
+    // teleport, not a walk). For Pythe specifically, the existing
+    // pythe_actions Lua bus has a `tele_xyz` verb that uses Map::AddMessage
+    // — both paths coexist; this SOAP path is the orchestration entry point
+    // for non-Pythe targets.
+    if (cmd.find("tele_xyz ") == 0)
+    {
+        std::string rest = cmd.substr(9);
+        size_t s1 = rest.find(' ');
+        if (s1 == std::string::npos)
+        {
+            LOG_ERROR("playerbots", "Usage: rndbot tele_xyz <bot> <map> <x> <y> <z>");
+            return false;
+        }
+        std::string botname = rest.substr(0, s1);
+        std::string tail    = rest.substr(s1 + 1);
+        size_t s2 = tail.find(' ');
+        if (s2 == std::string::npos)
+        {
+            LOG_ERROR("playerbots", "Usage: rndbot tele_xyz <bot> <map> <x> <y> <z>");
+            return false;
+        }
+        std::string mapStr = tail.substr(0, s2);
+        std::string coords = tail.substr(s2 + 1);
+        size_t s3 = coords.find(' ');
+        size_t s4 = (s3 == std::string::npos) ? std::string::npos : coords.find(' ', s3 + 1);
+        if (s3 == std::string::npos || s4 == std::string::npos)
+        {
+            LOG_ERROR("playerbots", "Usage: rndbot tele_xyz <bot> <map> <x> <y> <z>");
+            return false;
+        }
+        std::string xStr = coords.substr(0, s3);
+        std::string yStr = coords.substr(s3 + 1, s4 - s3 - 1);
+        std::string zStr = coords.substr(s4 + 1);
+
+        ObjectGuid bguid = sCharacterCache->GetCharacterGuidByName(botname);
+        if (!bguid)
+        {
+            LOG_ERROR("playerbots", "rndbot tele_xyz: char not found ({})", botname.c_str());
+            return false;
+        }
+        Player* bot = ObjectAccessor::FindPlayer(bguid);
+        if (!bot || !bot->GetSession())
+        {
+            LOG_ERROR("playerbots", "rndbot tele_xyz: bot {} not online", botname.c_str());
+            return false;
+        }
+
+        uint32 mapId = (uint32)std::atoi(mapStr.c_str());
+        float x = (float)std::atof(xStr.c_str());
+        float y = (float)std::atof(yStr.c_str());
+        float z = (float)std::atof(zStr.c_str());
+
+        bot->TeleportTo(mapId, x, y, z, bot->GetOrientation());
+        LOG_INFO("playerbots", "[tele_xyz] {} -> map {} ({}, {}, {})",
+                 botname.c_str(), mapId, x, y, z);
+        return true;
+    }
+
     std::map<std::string, ConsoleCommandHandler> handlers;
     // handlers["initmin"] = &RandomPlayerbotMgr::RandomizeMin;
     handlers["init"] = &RandomPlayerbotMgr::RandomizeFirst;
@@ -2449,6 +3084,11 @@ bool RandomPlayerbotMgr::HandlePlayerbotConsoleCommand(ChatHandler* handler, cha
         }
 
         uint32 processed = 0;
+
+        // (FIX WoWZoW: "add <name>" / "remove <name>" handlers were here
+        // but unreachable due to outer prefix-matching loop. Moved up above
+        // the handlers map — see comment near the top of this function.)
+
         for (std::vector<uint32>::iterator i = botIds.begin(); i != botIds.end(); ++i)
         {
             ObjectGuid guid = ObjectGuid::Create<HighGuid::Player>(*i);

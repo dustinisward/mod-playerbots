@@ -623,10 +623,10 @@ bool EmoteActionBase::ReceiveEmote(Player* source, uint32 emote, bool verbal)
     if (verbal)
     {
         if (emoteText.size())
-            bot->Say(emoteText, (bot->GetTeamId() == TEAM_ALLIANCE ? LANG_COMMON : LANG_ORCISH));
+            botAI->TellMasterNoFacing(emoteText);
 
         if (emoteYell.size())
-            bot->Yell(emoteYell, (bot->GetTeamId() == TEAM_ALLIANCE ? LANG_COMMON : LANG_ORCISH));
+            botAI->TellMasterNoFacing(emoteYell);
     }
 
     if (textEmote)

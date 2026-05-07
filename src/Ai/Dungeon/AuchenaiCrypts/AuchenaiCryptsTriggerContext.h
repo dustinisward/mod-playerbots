@@ -3,7 +3,7 @@
 
 #include "AiObjectContext.h"
 #include "TriggerContext.h"
-#include "AuchenaiCryptsTriggers.h"
+#include "Trigger/AuchenaiCryptsTriggers.h"
 
 class TbcDungeonAuchenaiCryptsTriggerContext : public NamedObjectContext<Trigger>
 {

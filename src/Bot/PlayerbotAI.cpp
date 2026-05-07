@@ -2970,9 +2970,19 @@ bool PlayerbotAI::TellMasterNoFacing(std::string const text, PlayerbotSecurityLe
     if ((!master || (masterBotAI && !masterBotAI->IsRealPlayer())) &&
         (sPlayerbotAIConfig.randomBotSayWithoutMaster || HasStrategy("debug", BOT_STATE_NON_COMBAT)))
     {
-        bot->Say(text, (bot->GetTeamId() == TEAM_ALLIANCE ? LANG_COMMON : LANG_ORCISH));
-        return true;
+        if (HasRealPlayerMaster() || sPlayerbotAIConfig.randomBotSayWithoutMaster)
+        {
+            bot->Say(text, (bot->GetTeamId() == TEAM_ALLIANCE ? LANG_COMMON : LANG_ORCISH));
+            return true;
+        }
+        return false;
     }
+
+    bool inGroupWithMaster = master && bot->GetGroup() && bot->GetGroup()->IsMember(master->GetGUID());
+    bool isReply = (time(nullptr) - currentChat.second) < 30; // 30s window for replies
+
+    if (master && !masterBotAI && !inGroupWithMaster && !isReply && !sPlayerbotAIConfig.randomBotSayWithoutMaster)
+        return false;
 
     if (!IsTellAllowed(securityLevel))
         return false;
@@ -2986,6 +2996,8 @@ bool PlayerbotAI::TellMasterNoFacing(std::string const text, PlayerbotSecurityLe
         ChatMsg type = CHAT_MSG_WHISPER;
         if (currentChat.second - time(nullptr) >= 1)
             type = currentChat.first;
+        else if (inGroupWithMaster)
+            type = CHAT_MSG_PARTY;
 
         WorldPacket data;
         ChatHandler::BuildChatPacket(data, type == CHAT_MSG_ADDON ? CHAT_MSG_PARTY : type,
@@ -5274,6 +5286,11 @@ std::string const PlayerbotAI::HandleRemoteCommand(std::string const command)
     else if (command == "action")
     {
         return currentEngine->GetLastAction();
+    }
+    else if (command.find("say ") == 0)
+    {
+        bot->Say(command.substr(4), LANG_UNIVERSAL);
+        return "ok";
     }
     else if (command == "values")
     {

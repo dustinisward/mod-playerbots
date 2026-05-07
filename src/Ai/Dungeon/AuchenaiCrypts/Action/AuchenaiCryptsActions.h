@@ -3,7 +3,7 @@
 
 #include "AttackAction.h"
 #include "MovementActions.h"
-#include "AuchenaiCryptsTriggers.h"
+#include "../Trigger/AuchenaiCryptsTriggers.h"
 
 // Shirrak the Dead Watcher
 

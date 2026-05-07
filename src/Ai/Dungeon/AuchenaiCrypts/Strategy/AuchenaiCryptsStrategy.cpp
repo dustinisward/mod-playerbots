@@ -1,6 +1,6 @@
-#include "AuchenaiCryptsTriggers.h"
+#include "../Trigger/AuchenaiCryptsTriggers.h"
 #include "AuchenaiCryptsStrategy.h"
-#include "AuchenaiCryptsMultipliers.h"
+#include "../Multiplier/AuchenaiCryptsMultipliers.h"
 
 void TbcDungeonAuchenaiCryptsStrategy::InitTriggers(std::vector<TriggerNode*>& triggers)
 {

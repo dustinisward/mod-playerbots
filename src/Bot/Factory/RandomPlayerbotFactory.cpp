@@ -58,7 +58,12 @@ Player* RandomPlayerbotFactory::CreateRandomBot(WorldSession* session, uint8 cls
 {
     LOG_DEBUG("playerbots", "Creating a new random bot for class: {}", cls);
 
-    const bool alliance = static_cast<bool>(urand(0, 1));
+    // FIXIT W19/W25 (WoWZoW 2026-05-05): weighted faction selection.
+    // Default 0.5 = the previous 50/50 behavior. Lordaeron-2015 fingerprint
+    // is closer to 0.48. Set via AiPlayerbot.RebalanceFactionAlliance.
+    const float allianceProb = sPlayerbotAIConfig.rebalanceFactionAlliance;
+    const bool alliance =
+        (frand(0.0f, 1.0f) < allianceProb);
 
     std::vector<uint8> raceOptions;
     for (uint8 race = RACE_HUMAN; race < sRaceMgr->GetMaxRaces(); ++race)
@@ -82,7 +87,41 @@ Player* RandomPlayerbotFactory::CreateRandomBot(WorldSession* session, uint8 cls
         return nullptr;
     }
 
-    const uint8 race = raceOptions[urand(0, raceOptions.size() - 1)];
+    // FIXIT W19/W25: weighted race selection within the chosen faction.
+    // Defaults are 100 for every race = the previous uniform behavior.
+    // Lordaeron-2015 example: Human=470, NightElf=220, Dwarf=180,
+    // Gnome=70, Draenei=60 inside Alliance.
+    uint8 race;
+    {
+        std::vector<uint32> raceWeights;
+        raceWeights.reserve(raceOptions.size());
+        uint64 totalWeight = 0;
+        for (uint8 r : raceOptions)
+        {
+            uint32 w = sPlayerbotAIConfig.GetRebalanceRaceBias(r);
+            raceWeights.push_back(w);
+            totalWeight += w;
+        }
+        if (totalWeight == 0)
+        {
+            race = raceOptions[urand(0, raceOptions.size() - 1)];
+        }
+        else
+        {
+            uint32 roll = urand(0, static_cast<uint32>(totalWeight - 1));
+            uint64 acc = 0;
+            race = raceOptions[0];
+            for (size_t i = 0; i < raceOptions.size(); ++i)
+            {
+                acc += raceWeights[i];
+                if (roll < acc)
+                {
+                    race = raceOptions[i];
+                    break;
+                }
+            }
+        }
+    }
     const uint8 gender = urand(0, 1) ? GENDER_MALE : GENDER_FEMALE;
     const auto raceAndGender = CombineRaceAndGender(race, gender);
 
@@ -447,6 +486,107 @@ void RandomPlayerbotFactory::CreateRandomBots()
 {
     /* multi-thread here is meaningless? since the async db operations */
 
+    // FIXIT W19/W25 (WoWZoW 2026-05-06): clear the cumulative randomBotAccounts
+    // vector before re-populating it. Initialize() can fire multiple times in
+    // a single worldserver lifetime (`.playerbots reload` GM command and the
+    // SOAP `playerbots reload` route both call it). Each call used to push
+    // every account onto this vector again, growing it 1500 -> 3000 -> 4500
+    // (visible in Server.log as ">> 4500 random bot accounts with 46866
+    // characters available" — the duplicate-counted summary). Downstream
+    // iterators in PlayerbotFactory::GetRandomBot and the rndbot console
+    // command then did duplicate work. Clearing here makes reload idempotent.
+    sPlayerbotAIConfig.randomBotAccounts.clear();
+
+    // FIXIT 2026-05-06: orphan-row PRIMARY KEY collision guard.
+    //
+    // After many cycles of partial DELETEs (mod-playerbots' default
+    // `L<80` purge, the rebalance script's old behavior, the historical
+    // RNDBOT churn), the `acore_characters.character_*` tables
+    // accumulate rows whose `guid` no longer references a row in
+    // `characters`. The worldserver GUID generator returns low-numbered
+    // GUIDs (the high-water mark walks back as DELETEs free space),
+    // and that GUID can collide with an orphan row in `character_action`
+    // (PRIMARY KEY `(guid, spec, button)`), `character_reputation`,
+    // `character_achievement_progress`, etc. `Player::SaveToDB`
+    // enqueues the inserts; MySQL rejects with `[1062] Duplicate entry`;
+    // the row never lands; the Player object is deleted from memory.
+    //
+    // Smoking gun: 2026-05-06 first full-purge rebalance, factory log
+    // said `>> 6751 Characters loaded into database` but the final
+    // summary read `>> 1500 random bot accounts with 618 characters
+    // available` — 6,133 rows were silently dropped, and Errors.log
+    // showed `[1062] Duplicate entry '23949-0-0' for key
+    // 'character_action.PRIMARY'` for every dropped char.
+    //
+    // The cleanup here runs every CreateRandomBots() pass (boot or
+    // reload). NOT-IN subqueries on indexed PKs are cheap on a clean
+    // pool (~ms) and do meaningful work only after a real desync. The
+    // first run on a long-lived realm can take seconds (we deleted
+    // ~2M rows on 2026-05-06's emergence); idempotent thereafter.
+    //
+    // Tables enumerated below match the cleanup the rebalance script
+    // does in --full-purge mode plus a few that mod-playerbots itself
+    // uses in deleteRandomBotAccounts mode. If you add a new char-keyed
+    // table to any cleanup path, mirror it here.
+    {
+        struct OrphanSweep { char const* sql; char const* label; };
+        static const OrphanSweep _ORPHAN_SWEEPS[] = {
+            // Tables with `guid` PK component — PRIMARY KEY collisions
+            // are the original "factory creates 6,751 chars but only 618
+            // land" bug. These MUST be swept before any factory pass.
+            {"DELETE FROM character_action WHERE guid NOT IN (SELECT guid FROM characters)", "character_action"},
+            {"DELETE FROM character_homebind WHERE guid NOT IN (SELECT guid FROM characters)", "character_homebind"},
+            {"DELETE FROM character_reputation WHERE guid NOT IN (SELECT guid FROM characters)", "character_reputation"},
+            {"DELETE FROM character_spell_cooldown WHERE guid NOT IN (SELECT guid FROM characters)", "character_spell_cooldown"},
+            {"DELETE FROM character_entry_point WHERE guid NOT IN (SELECT guid FROM characters)", "character_entry_point"},
+            {"DELETE FROM character_achievement WHERE guid NOT IN (SELECT guid FROM characters)", "character_achievement"},
+            {"DELETE FROM character_achievement_progress WHERE guid NOT IN (SELECT guid FROM characters)", "character_achievement_progress"},
+            {"DELETE FROM character_arena_stats WHERE guid NOT IN (SELECT guid FROM characters)", "character_arena_stats"},
+            // Tables that don't collide on PK but where orphan rows would
+            // be inherited by future chars created on the same recycled
+            // GUID. Cheap defensive cleanup — no new char wants to
+            // inherit a previous char's dead inventory / quests / talents.
+            {"DELETE FROM character_inventory WHERE guid NOT IN (SELECT guid FROM characters)", "character_inventory"},
+            {"DELETE FROM character_aura WHERE guid NOT IN (SELECT guid FROM characters)", "character_aura"},
+            {"DELETE FROM character_skills WHERE guid NOT IN (SELECT guid FROM characters)", "character_skills"},
+            {"DELETE FROM character_spell WHERE guid NOT IN (SELECT guid FROM characters)", "character_spell"},
+            {"DELETE FROM character_queststatus WHERE guid NOT IN (SELECT guid FROM characters)", "character_queststatus"},
+            {"DELETE FROM character_queststatus_rewarded WHERE guid NOT IN (SELECT guid FROM characters)", "character_queststatus_rewarded"},
+            {"DELETE FROM character_glyphs WHERE guid NOT IN (SELECT guid FROM characters)", "character_glyphs"},
+            {"DELETE FROM character_talent WHERE guid NOT IN (SELECT guid FROM characters)", "character_talent"},
+            {"DELETE FROM character_social WHERE guid NOT IN (SELECT guid FROM characters) OR friend NOT IN (SELECT guid FROM characters)", "character_social"},
+            // Owner-keyed tables (different column name).
+            {"DELETE FROM character_pet WHERE owner NOT IN (SELECT guid FROM characters)", "character_pet"},
+            {"DELETE FROM item_instance WHERE owner_guid > 0 AND owner_guid NOT IN (SELECT guid FROM characters)", "item_instance"},
+            // Player-referencing tables that strand mail / corpse / arena /
+            // group / petition state when a char is deleted without a
+            // proper LogoutPlayer cascade. 2026-05-06 audit found
+            // mail.receiver had 4,056 orphan rows (the only one out of
+            // ~15 surveyed); covering the rest defensively at near-zero
+            // cost (NOT IN subqueries on indexed PKs).
+            {"DELETE FROM mail WHERE receiver NOT IN (SELECT guid FROM characters)", "mail"},
+            {"DELETE FROM mail_items WHERE receiver NOT IN (SELECT guid FROM characters)", "mail_items"},
+            {"DELETE FROM corpse WHERE guid NOT IN (SELECT guid FROM characters)", "corpse"},
+            {"DELETE FROM arena_team_member WHERE guid NOT IN (SELECT guid FROM characters)", "arena_team_member"},
+            {"DELETE FROM petition WHERE ownerguid NOT IN (SELECT guid FROM characters)", "petition"},
+            {"DELETE FROM petition_sign WHERE ownerguid NOT IN (SELECT guid FROM characters) OR playerguid NOT IN (SELECT guid FROM characters)", "petition_sign"},
+            {"DELETE FROM group_member WHERE memberGuid NOT IN (SELECT guid FROM characters)", "group_member"},
+            {"DELETE FROM guild_member WHERE guid NOT IN (SELECT guid FROM characters)", "guild_member"},
+        };
+        uint32 sweepStart = getMSTime();
+        LOG_INFO("playerbots", "Sweeping orphan rows in side tables before factory pass...");
+        for (auto const& s : _ORPHAN_SWEEPS)
+            CharacterDatabase.Execute(s.sql);
+        // Wait for the cleanup queue to drain so the CREATE pass below
+        // can't race against pending DELETEs on the same GUIDs.
+        while (CharacterDatabase.QueueSize())
+            std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        LOG_INFO("playerbots",
+                 ">> Orphan sweep across {} tables complete in {} ms",
+                 (uint32)(sizeof(_ORPHAN_SWEEPS) / sizeof(_ORPHAN_SWEEPS[0])),
+                 GetMSTimeDiffToNow(sweepStart));
+    }
+
     if (sPlayerbotAIConfig.deleteRandomBotAccounts)
     {
         std::vector<uint32> botAccounts;
@@ -710,6 +850,24 @@ void RandomPlayerbotFactory::CreateRandomBots()
             // skip disabled with config classes
             if ((1 << (cls - 1)) & sWorld->getIntConfig(CONFIG_CHARACTER_CREATING_DISABLED_CLASSMASK))
                 continue;
+
+            // FIXIT W19/W25 (WoWZoW 2026-05-05): weighted class selection.
+            // Default 100 for every class = previous uniform behavior
+            // (always create one of each class per account). Setting a
+            // class's bias below the max scales its create probability
+            // proportionally — e.g. Rogue=50 with Paladin=220 means
+            // each account creates a Rogue 50/220=23% of the time, while
+            // always creating a Paladin. Aggregate over 1500 accounts =
+            // target Lordaeron-2015 distribution.
+            const uint32 classBias = sPlayerbotAIConfig.GetRebalanceClassBias(cls);
+            const uint32 classMax  = sPlayerbotAIConfig.GetRebalanceClassBiasMax();
+            if (classBias < classMax && classMax > 0)
+            {
+                if (urand(0, classMax - 1) >= classBias)
+                {
+                    continue;  // skip this class for this account
+                }
+            }
 
             Player* playerBot = factory.CreateRandomBot(session, cls, nameCache);
             if (!playerBot)

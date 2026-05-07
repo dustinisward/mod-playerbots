@@ -102,6 +102,37 @@ public:
     std::set<uint32> attunementQuests;
     std::set<uint32> unobtainableItems;
 
+    // FIXIT W19/W25 (WoWZoW 2026-05-05): demographic-rebalance config.
+    // `RebalanceFactionAlliance` is the probability (0.0-1.0) of picking
+    // alliance for a fresh bot — default 0.5 = current 50/50 behavior.
+    // `rebalanceClassBias[cls]` is per-class create-probability weight.
+    // Default 100 for every class = current uniform behavior. Lower values
+    // reduce that class's frequency proportionally (Rogue=40 with the
+    // max weight at 220 means 40/220=18% of accounts spawn a Rogue).
+    // Same shape for `rebalanceRaceBias[race]`. Helpers below resolve the
+    // weights with sane defaults so existing code paths see no behavior
+    // change unless the conf knobs are explicitly set.
+    float rebalanceFactionAlliance;
+    uint32 rebalanceClassBias[12];   // index 0 unused; CLASS_WARRIOR=1..CLASS_DRUID=11
+    uint32 rebalanceRaceBias[12];    // index 0 unused; RACE_HUMAN=1..RACE_DRAENEI=11
+
+    uint32 GetRebalanceClassBias(uint8 cls) const
+    {
+        return (cls < 12) ? rebalanceClassBias[cls] : 100;
+    }
+    uint32 GetRebalanceRaceBias(uint8 race) const
+    {
+        return (race < 12) ? rebalanceRaceBias[race] : 100;
+    }
+    uint32 GetRebalanceClassBiasMax() const
+    {
+        uint32 m = 100;
+        for (uint8 i = 1; i < 12; ++i)
+            if (rebalanceClassBias[i] > m)
+                m = rebalanceClassBias[i];
+        return m;
+    }
+
     uint32 openGoSpell;
     bool randomBotAutologin;
     bool botAutologin;

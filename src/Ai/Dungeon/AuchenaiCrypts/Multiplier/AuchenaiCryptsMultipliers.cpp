@@ -1,6 +1,6 @@
 #include "AuchenaiCryptsMultipliers.h"
-#include "AuchenaiCryptsActions.h"
-#include "AuchenaiCryptsTriggers.h"
+#include "../Action/AuchenaiCryptsActions.h"
+#include "../Trigger/AuchenaiCryptsTriggers.h"
 #include "MovementActions.h"
 #include "ReachTargetActions.h"
 #include "FollowActions.h"

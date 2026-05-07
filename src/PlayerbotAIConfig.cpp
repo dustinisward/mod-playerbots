@@ -235,6 +235,42 @@ bool PlayerbotAIConfig::Initialize()
 
     EnableICCBuffs = sConfigMgr->GetOption<bool>("AiPlayerbot.EnableICCBuffs", true);
 
+    //////////////////////////// Demographic rebalance (FIXIT W19/W25)
+    // Defaults preserve the pre-2026-05-05 uniform distribution so an
+    // unconfigured server sees no behavior change. Override with
+    // AiPlayerbot.Rebalance{FactionAlliance,ClassBias.<Name>,RaceBias.<Name>}
+    // in playerbots.conf to bias the bot factory.
+    rebalanceFactionAlliance = sConfigMgr->GetOption<float>(
+        "AiPlayerbot.RebalanceFactionAlliance", 0.5f);
+    {
+        static const char* kClassNames[12] = {
+            "", "Warrior", "Paladin", "Hunter", "Rogue", "Priest",
+            "DeathKnight", "Shaman", "Mage", "Warlock", "", "Druid"
+        };
+        for (uint8 i = 0; i < 12; ++i)
+        {
+            rebalanceClassBias[i] = 100;
+            if (kClassNames[i] && *kClassNames[i])
+            {
+                std::string key = std::string("AiPlayerbot.RebalanceClassBias.") + kClassNames[i];
+                rebalanceClassBias[i] = sConfigMgr->GetOption<uint32>(key, 100);
+            }
+        }
+        static const char* kRaceNames[12] = {
+            "", "Human", "Orc", "Dwarf", "NightElf", "Undead",
+            "Tauren", "Gnome", "Troll", "", "BloodElf", "Draenei"
+        };
+        for (uint8 i = 0; i < 12; ++i)
+        {
+            rebalanceRaceBias[i] = 100;
+            if (kRaceNames[i] && *kRaceNames[i])
+            {
+                std::string key = std::string("AiPlayerbot.RebalanceRaceBias.") + kRaceNames[i];
+                rebalanceRaceBias[i] = sConfigMgr->GetOption<uint32>(key, 100);
+            }
+        }
+    }
+
     //////////////////////////// Professions
     classMatchingProfessionChance =
         std::min<uint32>(100, sConfigMgr->GetOption<uint32>("AiPlayerbot.ClassMatchingProfessionChance", 30));

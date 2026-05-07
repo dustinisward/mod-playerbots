@@ -1,6 +1,6 @@
 #include "Playerbots.h"
 #include "AiFactory.h"
-#include "AuchenaiCryptsTriggers.h"
+#include "../Trigger/AuchenaiCryptsTriggers.h"
 #include "AuchenaiCryptsActions.h"
 
 // Shirrak the Dead Watcher

@@ -3,7 +3,7 @@
 
 #include "AiObjectContext.h"
 #include "Action.h"
-#include "AuchenaiCryptsActions.h"
+#include "Action/AuchenaiCryptsActions.h"
 
 class TbcDungeonAuchenaiCryptsActionContext : public NamedObjectContext<Action>
 {
