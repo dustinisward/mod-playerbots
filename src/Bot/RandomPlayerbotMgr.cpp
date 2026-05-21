@@ -1324,6 +1324,47 @@ void RandomPlayerbotMgr::CheckLfgQueue()
         }
     }
 
+    // WoWZoW #1047 (2026-05-20): solo-only / no-human-queued fallback.
+    // Upstream behavior: bot team pools are only populated from REAL
+    // PLAYERS' currently-selected dungeons. On WoWZoW (solo-only, owner
+    // is the sole human and typically not queued), `players` is either
+    // empty or no human has dungeons selected -- so LfgDungeons[ALLIANCE]
+    // and LfgDungeons[HORDE] stay empty forever. Every bot's JoinLFG()
+    // then bails at the "no dungeons configured for team" early-return
+    // (LfgActions.cpp:131-138) and the .lfg queue stays EMPTY despite
+    // RandomBotJoinLfg=1 and 158 L15+ bots online.
+    //
+    // Fix: when both team pools end up empty after the human-driven pass,
+    // seed them with the full sLFGDungeonStore set. JoinLFG() already
+    // filters per-bot by level (DBC MinLevel..MaxLevel) and TypeID
+    // (DUNGEON/HEROIC/RANDOM/RAID), and GetCompatibleDungeons() filters
+    // per-bot for locks/quests/keys downstream in LFGMgr, so seeding the
+    // raw pool is safe -- ineligible entries get discarded per-bot.
+    if (LfgDungeons[TEAM_ALLIANCE].empty() && LfgDungeons[TEAM_HORDE].empty())
+    {
+        uint32 seeded = 0;
+        for (uint32 i = 0; i < sLFGDungeonStore.GetNumRows(); ++i)
+        {
+            LFGDungeonEntry const* dungeon = sLFGDungeonStore.LookupEntry(i);
+            if (!dungeon)
+                continue;
+            // Only queueable types (DUNGEON=1, RAID=2, RANDOM=6, HEROIC=5
+            // per lfg::LfgType). Skip ZONE/SEASONAL/SUBDUNGEON entries.
+            if (dungeon->TypeID != lfg::LFG_TYPE_RANDOM &&
+                dungeon->TypeID != lfg::LFG_TYPE_DUNGEON &&
+                dungeon->TypeID != lfg::LFG_TYPE_HEROIC &&
+                dungeon->TypeID != lfg::LFG_TYPE_RAID)
+                continue;
+            LfgDungeons[TEAM_ALLIANCE].push_back(dungeon->ID);
+            LfgDungeons[TEAM_HORDE].push_back(dungeon->ID);
+            ++seeded;
+        }
+        LOG_INFO("playerbots",
+                 "LFG fallback: no humans queued, seeded {} dungeon entries "
+                 "into both team pools for bot self-queue",
+                 seeded);
+    }
+
     LOG_DEBUG("playerbots", "LFG Queue check finished");
 }
 
