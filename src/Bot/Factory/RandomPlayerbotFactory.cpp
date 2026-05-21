@@ -558,6 +558,13 @@ void RandomPlayerbotFactory::CreateRandomBots()
             // Owner-keyed tables (different column name).
             {"DELETE FROM character_pet WHERE owner NOT IN (SELECT guid FROM characters)", "character_pet"},
             {"DELETE FROM item_instance WHERE owner_guid > 0 AND owner_guid NOT IN (SELECT guid FROM characters)", "item_instance"},
+            // B110 (2026-05-12): pet_spell.guid references character_pet.id.
+            // Pet GUIDs are reused after character_pet rows are deleted, but
+            // stale pet_spell rows linger -> [1062] 'Duplicate entry' on the
+            // next pet spell insert. One-shot cleanup of 87 orphans landed
+            // 2026-05-12 (Backups/sql/pet_spell_orphans_20260512_095610.sql);
+            // this DELETE prevents the next recurrence cycle.
+            {"DELETE ps FROM pet_spell ps LEFT JOIN character_pet cp ON ps.guid = cp.id WHERE cp.id IS NULL", "pet_spell"},
             // Player-referencing tables that strand mail / corpse / arena /
             // group / petition state when a char is deleted without a
             // proper LogoutPlayer cascade. 2026-05-06 audit found

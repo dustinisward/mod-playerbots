@@ -109,6 +109,21 @@ public:
         creators["lfg role check"] = &WorldPacketActionContext::lfg_role_check;
         creators["lfg leave"] = &WorldPacketActionContext::lfg_leave;
         creators["lfg teleport"] = &WorldPacketActionContext::lfg_teleport;
+        // P1 #994 2026-05-19: bot vote-kick handler.
+        creators["lfg vote kick"] = &WorldPacketActionContext::lfg_vote_kick;
+        // #1000 2026-05-20: LFG teleport denied observability handler.
+        creators["lfg teleport denied"] = &WorldPacketActionContext::lfg_teleport_denied;
+        // #1002 2026-05-20: LFG queue status observability handler.
+        creators["lfg queue status"] = &WorldPacketActionContext::lfg_queue_status;
+        // #1003 2026-05-20: LFG join result observability handler.
+        creators["lfg join result"] = &WorldPacketActionContext::lfg_join_result;
+        // #1027 2026-05-20: LFG role chosen per-member observability handler.
+        creators["lfg role chosen"] = &WorldPacketActionContext::lfg_role_chosen;
+        // #1005 2026-05-20: LFG state-transition observability handlers.
+        creators["lfg update player"] = &WorldPacketActionContext::lfg_update_player;
+        creators["lfg update party"] = &WorldPacketActionContext::lfg_update_party;
+        // #1008 2026-05-20: LFG dungeon-completion reward observability.
+        creators["lfg player reward"] = &WorldPacketActionContext::lfg_player_reward;
         creators["see spell"] = &WorldPacketActionContext::see_spell;
         creators["arena team accept"] = &WorldPacketActionContext::arena_team_accept;
     }
@@ -175,6 +190,14 @@ private:
     static Action* lfg_accept(PlayerbotAI* botAI) { return new LfgAcceptAction(botAI); }
     static Action* lfg_role_check(PlayerbotAI* botAI) { return new LfgRoleCheckAction(botAI); }
     static Action* lfg_join(PlayerbotAI* botAI) { return new LfgJoinAction(botAI); }
+    static Action* lfg_vote_kick(PlayerbotAI* botAI) { return new LfgVoteKickAction(botAI); }
+    static Action* lfg_teleport_denied(PlayerbotAI* botAI) { return new LfgTeleportDeniedAction(botAI); }
+    static Action* lfg_queue_status(PlayerbotAI* botAI) { return new LfgQueueStatusAction(botAI); }
+    static Action* lfg_join_result(PlayerbotAI* botAI) { return new LfgJoinResultAction(botAI); }
+    static Action* lfg_role_chosen(PlayerbotAI* botAI) { return new LfgRoleChosenAction(botAI); }
+    static Action* lfg_update_player(PlayerbotAI* botAI) { return new LfgUpdatePlayerAction(botAI); }
+    static Action* lfg_update_party(PlayerbotAI* botAI) { return new LfgUpdatePartyAction(botAI); }
+    static Action* lfg_player_reward(PlayerbotAI* botAI) { return new LfgPlayerRewardAction(botAI); }
     static Action* see_spell(PlayerbotAI* botAI) { return new SeeSpellAction(botAI); }
     static Action* arena_team_accept(PlayerbotAI* botAI) { return new ArenaTeamAcceptAction(botAI); }
 };

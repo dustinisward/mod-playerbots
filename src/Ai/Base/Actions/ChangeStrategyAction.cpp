@@ -9,28 +9,39 @@
 #include "PlayerbotRepository.h"
 #include "Playerbots.h"
 
+// B159-c cherry-pick of upstream PR #2365 (merged 2026-05-09): factored
+// common strategy-prefix handling out of Combat/NonCombat. Also adds
+// the new `!` prefix which selectively resets the indicated engine
+// state (combat or non-combat) to its class+spec defaults.
+static void HandleStrategyCommon(PlayerbotAI* botAI, std::string const& text, BotState state)
+{
+    std::vector<std::string> splitted = split(text, ',');
+    for (std::vector<std::string>::iterator i = splitted.begin(); i != splitted.end(); i++)
+    {
+        const char* name = i->c_str();
+        switch (name[0])
+        {
+            case '+':
+            case '-':
+            case '~':
+                PlayerbotRepository::instance().Save(botAI);
+                break;
+            case '!':
+                botAI->SelectiveResetStrategies(state);
+                PlayerbotRepository::instance().Save(botAI);
+                break;
+            case '?':
+                break;
+        }
+    }
+}
+
 bool ChangeCombatStrategyAction::Execute(Event event)
 {
     std::string const text = event.getParam();
     botAI->ChangeStrategy(text.empty() ? getName() : text, BOT_STATE_COMBAT);
     if (event.GetSource() == "co")
-    {
-        std::vector<std::string> splitted = split(text, ',');
-        for (std::vector<std::string>::iterator i = splitted.begin(); i != splitted.end(); i++)
-        {
-            const char* name = i->c_str();
-            switch (name[0])
-            {
-                case '+':
-                case '-':
-                case '~':
-                    PlayerbotRepository::instance().Save(botAI);
-                    break;
-                case '?':
-                    break;
-            }
-        }
-    }
+        HandleStrategyCommon(botAI, text, BOT_STATE_COMBAT);
 
     return true;
 }
@@ -52,23 +63,7 @@ bool ChangeNonCombatStrategyAction::Execute(Event event)
 
     botAI->ChangeStrategy(text, BOT_STATE_NON_COMBAT);
     if (event.GetSource() == "nc")
-    {
-        std::vector<std::string> splitted = split(text, ',');
-        for (std::vector<std::string>::iterator i = splitted.begin(); i != splitted.end(); i++)
-        {
-            const char* name = i->c_str();
-            switch (name[0])
-            {
-                case '+':
-                case '-':
-                case '~':
-                    PlayerbotRepository::instance().Save(botAI);
-                    break;
-                case '?':
-                    break;
-            }
-        }
-    }
+        HandleStrategyCommon(botAI, text, BOT_STATE_NON_COMBAT);
 
     return true;
 }

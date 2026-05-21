@@ -140,6 +140,10 @@ bool PullStartAction::Execute(Event event)
         }
     }
 
+    // PROJECT_GOALS pillar 3 (2026-05-20): deterministic pull callout.
+    // Gated by `AiPlayerbot.RandomBotCombatCallouts`. No-op when disabled.
+    botAI->CombatChatOnPullStarted(target);
+
     strategy->OnPullStarted();
     return true;
 }

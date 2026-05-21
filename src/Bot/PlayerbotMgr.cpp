@@ -530,6 +530,14 @@ void PlayerbotHolder::OnBotLogin(Player* const bot)
     {
         botAI->ResetStrategies(!sRandomPlayerbotMgr.IsRandomBot(bot));
     }
+
+    // WoWZoW (Wishmaster #1521 thread-safe port via PR #1143 pattern, 2026-05-20):
+    //   Clear transient LFG state ("lfg proposal" / role-check) on bot login so a
+    //   logout mid-proposal does not leak stale flags into the next queue cycle.
+    //   Reset() mutates AI-local state only (does not touch sLFGMgr); OnBotLogin
+    //   runs on the world thread so this is safe.
+    botAI->Reset(true);
+
     PlayerbotRepository::instance().Load(botAI);
 
     if (master && !master->HasUnitState(UNIT_STATE_IN_FLIGHT))
@@ -550,7 +558,17 @@ void PlayerbotHolder::OnBotLogin(Player* const bot)
     if (master && master->GetGroup() && !group)
     {
         Group* mgroup = master->GetGroup();
-        if (mgroup->GetMembersCount() >= 5)
+        // WoWZoW (Wishmaster #1521 thread-safe port via PR #1143 pattern, 2026-05-20):
+        //   `GetMembersCount() + 1 > 5` reads as "would THIS bot push the group
+        //   past 5". Mathematically equivalent to `>= 5` but the intent is
+        //   explicit. The real fix is below: AddMember is now unconditional
+        //   inside this branch. Previously a 5-member party adding its 6th
+        //   queued ConvertToRaid + AddMember-only-if-isRaidGroup, which raced:
+        //   the raid-check ran on the queueing-thread view (still party) so
+        //   AddMember was silently skipped; the bot ended up orphaned of the
+        //   group. Both ops are queued and execute serially on the world
+        //   thread, so unconditional AddMember is safe.
+        if (mgroup->GetMembersCount() + 1 > 5)
         {
             if (!mgroup->isRaidGroup() && !mgroup->isLFGGroup() && !mgroup->isBGGroup() && !mgroup->isBFGroup())
             {
@@ -558,12 +576,9 @@ void PlayerbotHolder::OnBotLogin(Player* const bot)
                 auto convertOp = std::make_unique<GroupConvertToRaidOperation>(master->GetGUID());
                 PlayerbotWorldThreadProcessor::instance().QueueOperation(std::move(convertOp));
             }
-            if (mgroup->isRaidGroup())
-            {
-                // Queue AddMember operation
-                auto addOp = std::make_unique<GroupInviteOperation>(master->GetGUID(), bot->GetGUID());
-                PlayerbotWorldThreadProcessor::instance().QueueOperation(std::move(addOp));
-            }
+            // Queue AddMember operation (unconditional: convert is already queued ahead of this op).
+            auto addOp = std::make_unique<GroupInviteOperation>(master->GetGUID(), bot->GetGUID());
+            PlayerbotWorldThreadProcessor::instance().QueueOperation(std::move(addOp));
         }
         else
         {
@@ -1542,6 +1557,26 @@ void PlayerbotMgr::HandleMasterIncomingPacket(WorldPacket const& packet)
         // if master is logging out, log out all bots
         case CMSG_LOGOUT_REQUEST:
         {
+            // B151-d cherry-pick of upstream PR #2328 (merged 2026-05-09):
+            // replicate WorldSession::HandleLogoutRequestOpcode AFK-prevent
+            // gates so bots don't log out when the master's own logout
+            // will be denied (sanctuary AFK / global AFK-prevent modes).
+            Player* master = GetMaster();
+            if (master)
+            {
+                AreaTableEntry const* areaEntry = sAreaTableStore.LookupEntry(master->GetAreaId());
+                bool preventAfkSanctuaryLogout = sWorld->getIntConfig(CONFIG_AFK_PREVENT_LOGOUT) == 1
+                                                 && master->isAFK() && areaEntry && areaEntry->IsSanctuary();
+
+                bool preventAfkLogout = sWorld->getIntConfig(CONFIG_AFK_PREVENT_LOGOUT) == 2
+                                        && master->isAFK();
+
+                if (preventAfkSanctuaryLogout || preventAfkLogout)
+                {
+                    break;
+                }
+            }
+
             LogoutAllBots();
             break;
         }

@@ -6,7 +6,9 @@
 #ifndef _PLAYERBOT_PLAYERBOTAI_H
 #define _PLAYERBOT_PLAYERBOTAI_H
 
+#include <ctime>
 #include <stack>
+#include <unordered_map>
 
 #include "Chat.h"
 #include "ChatFilter.h"
@@ -405,6 +407,8 @@ public:
                                   std::string const qualifier = "");
     void ChangeStrategy(std::string const name, BotState type);
     void ClearStrategies(BotState type);
+    // B159-c (PR #2365): selective reset to class/spec defaults via `!` prefix.
+    void SelectiveResetStrategies(BotState type);
     std::vector<std::string> GetStrategies(BotState type);
     Strategy* GetStrategy(std::string const name, BotState type);
     void ApplyInstanceStrategies(uint32 mapId, bool tellMaster = false);
@@ -469,6 +473,13 @@ public:
     bool Yell(const std::string& msg);
     bool Say(const std::string& msg);
     bool Whisper(const std::string& msg, const std::string& receiverName);
+
+    // Combat event callouts (deterministic, <500ms, fires via PlayerbotTextMgr).
+    // PROJECT_GOALS pillar 3 (realistic bot communication, 2026-05-20).
+    // All return false when AiPlayerbot.RandomBotCombatCallouts = 0 (default).
+    bool CombatChatOnPullStarted(Unit* target);
+    bool CombatChatOnWipeDetected(Unit* boss);
+    bool CombatChatOnBossKilled(Unit* victim);
 
     void SpellInterrupted(uint32 spellid);
     int32 CalculateGlobalCooldown(uint32 spellid);
@@ -615,6 +626,13 @@ private:
     void UpdateAIGroupMaster();
     Item* FindItemInInventory(std::function<bool(ItemTemplate const*)> checkItem) const;
     void HandleCommands();
+
+    // PROJECT_GOALS pillar 3 (2026-05-20): per-bot cooldown table for deterministic
+    // combat-chat callouts. Keyed by `target_guid.GetCounter()` for pulls, by
+    // `victim_guid.GetCounter() + 0x1000000` offset for boss kills, and by
+    // `(group_guid.GetCounter() ^ boss_guid.GetCounter())` for wipes.
+    // Cleared with the bot (member of PlayerbotAI instance).
+    std::unordered_map<ObjectGuid::LowType, time_t> m_combatEventCooldowns;
     void HandleCommand(uint32 type, const std::string& text, Player& fromPlayer, const uint32 lang = LANG_UNIVERSAL);
     inline bool IsValidUnit(const Unit* unit) const
     {
@@ -653,6 +671,13 @@ protected:
     bool spellInterruptRequested = false;
     void CheckLLMChatResponses();
     uint32 llmCheckTimer_{0};
+
+    // B155 (2026-05-16, Report #5): per-second tank threat boost. Tops
+    // up bot tank threat to sPlayerbotAIConfig.threatModifier x top-of-table
+    // when bot is tank role + in combat. No-op if threatModifier <= 1.0
+    // or bot already ahead. Called from UpdateAI inside the existing
+    // 1 Hz llmCheckTimer block. Implementation in PlayerbotAI.cpp.
+    void BoostTankThreatIfTanking();
 };
 
 #endif

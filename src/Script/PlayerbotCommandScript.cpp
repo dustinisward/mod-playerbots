@@ -52,6 +52,20 @@ public:
             {"gtask", HandleGuildTaskCommand, SEC_GAMEMASTER, Console::Yes},
             {"pmon", HandlePerfMonCommand, SEC_GAMEMASTER, Console::Yes},
             {"rndbot", HandleRandomPlayerbotCommand, SEC_GAMEMASTER, Console::Yes},
+            // B167 (FIXED #823, 2026-05-17): world-thread-safe player-money
+            // mutator. SOAP/Console routes through sWorld->QueueCliCommand
+            // so the ModifyMoney call runs on the world thread, avoiding
+            // the auto-save cache race that the Python-side direct DB
+            // UPDATE in take_gold suffers when the player is online.
+            {"modifymoney", HandleModifyMoneyCommand, SEC_GAMEMASTER, Console::Yes},
+            // B173 (#904, 2026-05-17): world-thread-safe player-level mutator
+            // mirroring modifymoney. Closes the same in-memory-vs-DB race
+            // for set_level: SOAP `character level <name> <N>` updates the
+            // in-memory Player but DB only persists on next 15-min auto-save
+            // (B167-class). This command calls Player::GiveLevel(N) on the
+            // world thread + explicitly SaveToDB so the level survives a
+            // pre-save logout. Bundles into next worldserver rebuild.
+            {"modifylevel", HandleModifyLevelCommand, SEC_GAMEMASTER, Console::Yes},
             {"travel", playerbotsTravelCommandTable},
             {"debug", playerbotsDebugCommandTable},
             {"account", playerbotsAccountCommandTable},
@@ -352,6 +366,115 @@ public:
             handler->PSendSysMessage("PlayerbotMgr instance not found.");
             return false;
         }
+    }
+
+    // B167 (FIXED #823, 2026-05-17): SOAP-friendly money mutator that
+    // accepts negative deltas. The existing `.modify money <amount>`
+    // requires a selected in-game target (cs_modify.cpp:563
+    // `handler->getSelectedPlayer()`), which SOAP cannot satisfy.
+    // The existing `.send money <name>` mails money via MailDraft but
+    // cannot remove money. This new command takes a player name + signed
+    // delta and routes through Player::ModifyMoney when online (handles
+    // negative + clamps to 0 via SetMoney) or a direct CharacterDatabase
+    // UPDATE when offline. Because the command is registered with
+    // Console::Yes, SOAP invokes it through sWorld->QueueCliCommand --
+    // execution happens on the world thread, so the auto-save cache
+    // race observed in the Python take_gold tool is eliminated.
+    static bool HandleModifyMoneyCommand(ChatHandler* handler, Optional<PlayerIdentifier> player, int32 amount)
+    {
+        if (!player)
+        {
+            handler->PSendSysMessage("usage: .playerbots modifymoney <player> <copper-delta>");
+            return false;
+        }
+        if (amount == 0)
+        {
+            handler->PSendSysMessage("amount must be non-zero");
+            return false;
+        }
+
+        if (Player* target = player->GetConnectedPlayer())
+        {
+            uint32 cur = target->GetMoney();
+            if (amount < 0)
+            {
+                uint32 sub = static_cast<uint32>(-amount);
+                if (sub >= cur)
+                    target->SetMoney(0);
+                else
+                    target->SetMoney(cur - sub);
+            }
+            else
+            {
+                // ModifyMoney internally clamps at MAX_MONEY_AMOUNT.
+                target->ModifyMoney(amount);
+            }
+            handler->PSendSysMessage("ok: online %s money %u -> %u (delta %d)",
+                                    player->GetName().c_str(), cur, target->GetMoney(), amount);
+            return true;
+        }
+
+        // Offline path: direct DB UPDATE on acore_characters.characters.money.
+        // Clamp at 0 via GREATEST() so negative overflows don't wrap.
+        if (amount < 0)
+        {
+            CharacterDatabase.Execute(
+                "UPDATE characters SET money = GREATEST(CAST(money AS SIGNED) - {}, 0) WHERE guid = {}",
+                static_cast<uint32>(-amount), player->GetGUID().GetCounter());
+        }
+        else
+        {
+            CharacterDatabase.Execute(
+                "UPDATE characters SET money = LEAST(CAST(money AS UNSIGNED) + {}, 9999999999) WHERE guid = {}",
+                static_cast<uint32>(amount), player->GetGUID().GetCounter());
+        }
+        handler->PSendSysMessage("ok: offline %s money delta %d (DB UPDATE)",
+                                player->GetName().c_str(), amount);
+        return true;
+    }
+
+    // B173 (#904, 2026-05-17): set player level with immediate DB persistence.
+    // The vanilla `character level <name> <N>` SOAP command calls
+    // Player::GiveLevel which updates in-memory but DB writes only on next
+    // SaveToDB cycle (15-min default, or zone change / logout). If the
+    // player logs out before save, login loads from DB and the level
+    // reverts. This command calls GiveLevel on the world thread (Console::Yes
+    // routes through sWorld->QueueCliCommand) then explicitly SaveToDB(false,
+    // false) so the level is durable even on immediate logout. Offline
+    // path: direct DB UPDATE on characters.level (next character load picks
+    // up the new value). Same shape as HandleModifyMoneyCommand (B167).
+    static bool HandleModifyLevelCommand(ChatHandler* handler, Optional<PlayerIdentifier> player, int32 newLevel)
+    {
+        if (!player)
+        {
+            handler->PSendSysMessage("usage: .playerbots modifylevel <player> <new-level>");
+            return false;
+        }
+        if (newLevel < 1 || newLevel > 80)
+        {
+            handler->PSendSysMessage("level must be in [1, 80]; got %d", newLevel);
+            return false;
+        }
+
+        if (Player* target = player->GetConnectedPlayer())
+        {
+            uint8 cur = target->GetLevel();
+            target->GiveLevel(static_cast<uint8>(newLevel));
+            // Explicit SaveToDB so the level survives a pre-auto-save logout.
+            // false/false = not on-login, not in-transaction.
+            target->SaveToDB(false, false);
+            handler->PSendSysMessage("ok: online %s level %u -> %u (SaveToDB fired)",
+                                    player->GetName().c_str(), cur, newLevel);
+            return true;
+        }
+
+        // Offline path: direct DB UPDATE on acore_characters.characters.level.
+        CharacterDatabase.Execute(
+            "UPDATE characters SET level = {} WHERE guid = {}",
+            static_cast<uint32>(newLevel), player->GetGUID().GetCounter());
+        handler->PSendSysMessage("ok: offline %s level -> %u (DB UPDATE)",
+                                player->GetName().c_str(), newLevel);
+        return true;
     }
 
     static bool HandleUnlinkAccountCommand(ChatHandler* handler, char const* args)

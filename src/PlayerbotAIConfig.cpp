@@ -131,8 +131,25 @@ bool PlayerbotAIConfig::Initialize()
     randomBotMinLevelChance = sConfigMgr->GetOption<float>("AiPlayerbot.RandomBotMinLevelChance", 0.1f);
     randomBotMaxLevelChance = sConfigMgr->GetOption<float>("AiPlayerbot.RandomBotMaxLevelChance", 0.1f);
     randomBotRpgChance = sConfigMgr->GetOption<float>("AiPlayerbot.RandomBotRpgChance", 0.20f);
+    // B155 (2026-05-16, per Gemini Report #5): tank threat boost multiplier.
+    // 1.0 = disabled; 1.5 = Lordaeron-realism default. >1.0 enables the
+    // BoostTankThreatAction periodic loop in TankAssistStrategy.
+    threatModifier = sConfigMgr->GetOption<float>("AiPlayerbot.ThreatModifier", 1.0f);
 
     iterationsPerTick = sConfigMgr->GetOption<int32>("AiPlayerbot.IterationsPerTick", 10);
+
+    // B88(A) Tier-3 (STAGED #953, 2026-05-18): per-tick AI-update budget.
+    // Max # of bots whose PlayerbotAI::UpdateAI may execute the expensive
+    // path within a single world-tick (Map::Update). 0 = unlimited /
+    // pre-patch behavior (default). When >0, bots beyond the budget are
+    // skipped THIS tick only -- their nextAICheckDelay decrements normally
+    // and the next world tick re-considers them. No AI is lost; cost is
+    // amortized. Companion to the Tier-2 boot-storm throttle (STAGED #927)
+    // which only addresses the cap-raise INIT window. Per FIXED #946
+    // empirical, cap=200 crashed at ~5min steady-state regardless of the
+    // boot-storm throttle. See `reference_bot_pop_ceiling_empirical_
+    // 2026_05_18.md` + FIXIT row #947.
+    maxBotAIUpdatesPerTick = sConfigMgr->GetOption<uint32>("AiPlayerbot.MaxBotAIUpdatesPerTick", 0);
 
     allowAccountBots = sConfigMgr->GetOption<bool>("AiPlayerbot.AllowAccountBots", true);
     allowGuildBots = sConfigMgr->GetOption<bool>("AiPlayerbot.AllowGuildBots", true);
@@ -141,6 +158,8 @@ bool PlayerbotAIConfig::Initialize()
     randomBotGuildNearby = sConfigMgr->GetOption<bool>("AiPlayerbot.RandomBotGuildNearby", false);
     randomBotInvitePlayer = sConfigMgr->GetOption<bool>("AiPlayerbot.RandomBotInvitePlayer", false);
     inviteChat = sConfigMgr->GetOption<bool>("AiPlayerbot.InviteChat", false);
+    // PROJECT_GOALS pillar 3 (2026-05-20): deterministic combat-chat callouts.
+    randomBotCombatCallouts = sConfigMgr->GetOption<bool>("AiPlayerbot.RandomBotCombatCallouts", false);
 
     randomBotMapsAsString = sConfigMgr->GetOption<std::string>("AiPlayerbot.RandomBotMaps", "0,1,530,571");
     LoadList<std::vector<uint32>>(randomBotMapsAsString, randomBotMaps);

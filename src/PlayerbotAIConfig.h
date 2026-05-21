@@ -84,6 +84,10 @@ public:
     bool EnableICCBuffs;
     bool allowAccountBots, allowGuildBots, allowTrustedAccountBots;
     bool randomBotGuildNearby, randomBotInvitePlayer, inviteChat;
+    // PROJECT_GOALS pillar 3 (2026-05-20): deterministic combat-chat callouts
+    // (pulls / wipes / boss kills) via PlayerbotTextMgr. See
+    // `AiPlayerbot.RandomBotCombatCallouts` in playerbots.conf. Default off.
+    bool randomBotCombatCallouts;
     uint32 globalCoolDown, reactDelay, maxWaitForMove, disableMoveSplinePath, maxMovementSearchTime, expireActionTime,
         dispelAuraDuration, passiveDelay, repeatDelay, errorDelay, rpgDelay, sitDelay, returnDelay, lootDelay;
     bool dynamicReactDelay;
@@ -163,6 +167,12 @@ public:
     bool preferredSpecWeapons;
     float randomBotMinLevelChance, randomBotMaxLevelChance;
     float randomBotRpgChance;
+    // B155 (2026-05-16, per Gemini Report #5): per-tick bot tank threat
+    // boost multiplier. Compensates for reactive tanking AI (no pre-pull
+    // pots / snapshots / engineering explosives) by inflating threat-add
+    // for tanks. 1.0 = disabled. Report #5 recommends 1.5 for Lordaeron
+    // realism. Applied by BoostTankThreatAction in TankAssistStrategy.
+    float threatModifier;
     uint32 minRandomBots, maxRandomBots;
     uint32 randomBotUpdateInterval, randomBotCountChangeMinInterval, randomBotCountChangeMaxInterval;
     uint32 minRandomBotInWorldTime, maxRandomBotInWorldTime;
@@ -335,6 +345,12 @@ public:
     uint32 guildTaskKillTaskDistance;
 
     uint32 iterationsPerTick;
+
+    // B88(A) Tier-3 (STAGED #953, 2026-05-18): per-tick AI-update budget.
+    // 0 = unlimited (default, pre-patch behavior). >0 caps how many bots'
+    // PlayerbotAI::UpdateAI execute the expensive path per world tick;
+    // skipped bots tick on the next world tick. See PlayerbotAI.cpp:UpdateAI.
+    uint32 maxBotAIUpdatesPerTick;
 
     std::mutex m_logMtx;
     std::vector<std::string> tradeActionExcludedPrefixes;

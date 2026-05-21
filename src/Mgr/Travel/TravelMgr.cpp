@@ -4658,9 +4658,13 @@ void TravelMgr::PrepareDestinationCache()
             (creatureTemplate->unit_flags & 4096) == 0 &&
             creatureTemplate->rank == 0)
         {
-            uint32 roundX = static_cast<uint32>(std::round(x / 50.0f));
-            uint32 roundY = static_cast<uint32>(std::round(y / 50.0f));
-            uint32 roundZ = static_cast<uint32>(std::round(z / 50.0f));
+            // B151-b cherry-pick of upstream PR #2376 (merged 2026-05-09):
+            // negative coords were silently wrapping under uint32 round();
+            // int32 + lround() preserves sign and reproduces the same grid
+            // bin for symmetric positions across the world origin.
+            int32 roundX = static_cast<int32>(std::lround(x / 50.0f));
+            int32 roundY = static_cast<int32>(std::lround(y / 50.0f));
+            int32 roundZ = static_cast<int32>(std::lround(z / 50.0f));
             tempLocsCache[std::make_tuple(mapId, roundX, roundY, roundZ)].push_back(creatureData);
             tempCreatureCache[templateEntry][areaId].push_back(WorldLocation(mapId, x, y, z));
         }

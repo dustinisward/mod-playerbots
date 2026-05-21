@@ -292,6 +292,26 @@ void RandomPlayerbotMgr::UpdateAIInternal(uint32 /*elapsed*/, bool /*minimal*/)
     if (!sPlayerbotAIConfig.randomBotAutologin || !sPlayerbotAIConfig.enabled)
         return;
 
+    // B144 (2026-05-13): Auto-spawn Pythe (char guid=2506, PYTHE account id=206,
+    // gmlevel=3) using the same bypass RNDBOTs use (AddPlayerBot ->
+    // HandlePlayerLoginFromDB). Per locked memory + FIXED #271 (B68), Pythe
+    // was previously a manual-second-client login -- friction owner wants gone.
+    // Retain the gmlevel=3 GM context since the matrix Pythe brain dispatches
+    // GM-level SOAP commands on Pythe's behalf.
+    // Re-spawns if Pythe goes offline (logout, WS-internal cleanup). Lightweight
+    // tick-once check (single Player* lookup).
+    static const uint32 PYTHE_GUID = 2506;
+    {
+        ObjectGuid pytheObjGuid = ObjectGuid::Create<HighGuid::Player>(PYTHE_GUID);
+        Player* pythePlayer = ObjectAccessor::FindPlayer(pytheObjGuid);
+        if (!pythePlayer)
+        {
+            // Not online -- ensure she's queued. AddPlayerBot is the
+            // RNDBOT-style direct login bypass that doesn't need a client.
+            AddPlayerBot(pytheObjGuid, 0);
+        }
+    }
+
     /*if (sPlayerbotAIConfig.enablePrototypePerformanceDiff)
     {
         LOG_INFO("playerbots", "---------------------------------------");
@@ -328,7 +348,25 @@ void RandomPlayerbotMgr::UpdateAIInternal(uint32 /*elapsed*/, bool /*minimal*/)
     }
 
     uint32 updateIntervalTurboBoost = _isBotInitializing ? 1 : sPlayerbotAIConfig.randomBotUpdateInterval;
-    SetNextCheckDelay(updateIntervalTurboBoost * (onlineBotFocus + 25) * 10);
+    uint32 nextCheck = updateIntervalTurboBoost * (onlineBotFocus + 25) * 10;
+    // B88(A) Tier-2 (STAGED #927, 2026-05-18): cap-aware boot-storm
+    // throttle. Per empirical `reference_bot_pop_ceiling_empirical_
+    // 2026_05_18.md`, cap=200 with the flat 1000ms boot-storm tick
+    // saturates the world thread + ACSoap in ~3min (SOAP latency
+    // 9999ms). The InitGuild storm is gated (commit f841de44 + #915)
+    // but per-bot world-entry cost still exceeds drain capacity at
+    // higher caps. Scale the boot-storm tick by ~10ms per bot above
+    // cap=150 so arrival rate stays bounded -- at cap=150 nextCheck
+    // stays 1000ms (no change), at cap=200 floor becomes 1500ms
+    // (4 bots / 1.5s = 2.67/sec vs 4/sec uncapped), at cap=300 floor
+    // becomes 2500ms (1.6/sec). Backward-compatible: cap<=150 sees no
+    // behavior change. Init-phase only (steady-state unchanged).
+    if (_isBotInitializing && sPlayerbotAIConfig.maxRandomBots > 150)
+    {
+        uint32 floorMs = (sPlayerbotAIConfig.maxRandomBots - 150) * 10 + 1000;
+        nextCheck = std::max(nextCheck, floorMs);
+    }
+    SetNextCheckDelay(nextCheck);
 
     PerfMonitorOperation* pmo = sPerfMonitor.start(
         PERF_MON_TOTAL,
@@ -2074,7 +2112,10 @@ void RandomPlayerbotMgr::Refresh(Player* bot)
 
     bot->DurabilityRepairAll(false, 1.0f, false);
     bot->SetFullHealth();
-    bot->SetPvP(true);
+    // B151-a cherry-pick of upstream PR #2342 (merged 2026-05-03): bots
+    // mirror realm PvP setting on Refresh + OnPlayerLogin instead of
+    // hard-coded true. Matches our SOLO-only Normal-realm baseline.
+    bot->SetPvP(sWorld->IsPvPRealm());
     PlayerbotFactory factory(bot, bot->GetLevel());
     factory.Refresh();
 
@@ -3034,6 +3075,133 @@ bool RandomPlayerbotMgr::HandlePlayerbotConsoleCommand(ChatHandler* handler, cha
         return true;
     }
 
+    // B28 (CPP Patch 2 leftover, owner-greenlit 2026-05-08): broadcast a
+    // strategy change to every online RNDBOT in a given zone. Form:
+    // `playerbots rndbot strat_zone <zone_id> <combat|noncombat|dead> <strategy>`.
+    // Use case: "everyone in Stormwind reacts to Pythe's /yell" — orchestrator
+    // sets `strat_zone 1519 noncombat +follow,-grind,-stay` so all bots in
+    // map zone 1519 follow whoever invites them. Iterates the live playerBots
+    // map, filters by GetZoneId(), applies ChangeStrategy on each. Returns
+    // count via INFO log so the SOAP caller has visibility on how many bots
+    // received the verb.
+    if (cmd.find("strat_zone ") == 0)
+    {
+        std::string rest = cmd.substr(11);
+        size_t s1 = rest.find(' ');
+        if (s1 == std::string::npos)
+        {
+            LOG_ERROR("playerbots",
+                "Usage: rndbot strat_zone <zone_id> <combat|noncombat|dead> <strategy>");
+            return false;
+        }
+        std::string zoneStr = rest.substr(0, s1);
+        std::string r2 = rest.substr(s1 + 1);
+        size_t s2 = r2.find(' ');
+        if (s2 == std::string::npos)
+        {
+            LOG_ERROR("playerbots",
+                "Usage: rndbot strat_zone <zone_id> <combat|noncombat|dead> <strategy>");
+            return false;
+        }
+        std::string statename = r2.substr(0, s2);
+        std::string strategy  = r2.substr(s2 + 1);
+
+        BotState state;
+        if (statename == "combat") state = BOT_STATE_COMBAT;
+        else if (statename == "noncombat") state = BOT_STATE_NON_COMBAT;
+        else if (statename == "dead") state = BOT_STATE_DEAD;
+        else
+        {
+            LOG_ERROR("playerbots",
+                "rndbot strat_zone: state must be combat|noncombat|dead, got '{}'",
+                statename.c_str());
+            return false;
+        }
+
+        uint32 targetZone = (uint32)std::atoi(zoneStr.c_str());
+        if (targetZone == 0)
+        {
+            LOG_ERROR("playerbots",
+                "rndbot strat_zone: zone_id must be a non-zero integer, got '{}'",
+                zoneStr.c_str());
+            return false;
+        }
+
+        // HandlePlayerbotConsoleCommand is static, so iterate via the
+        // singleton (other instance-method use sites of GetPlayerBotsBegin/End
+        // can drop the qualifier — this static call site cannot).
+        uint32 hits = 0;
+        for (PlayerBotMap::const_iterator it = sRandomPlayerbotMgr.GetPlayerBotsBegin();
+             it != sRandomPlayerbotMgr.GetPlayerBotsEnd(); ++it)
+        {
+            Player* bot = it->second;
+            if (!bot || !bot->GetSession() || bot->GetZoneId() != targetZone)
+                continue;
+            PlayerbotAI* botAI = GET_PLAYERBOT_AI(bot);
+            if (!botAI) continue;
+            botAI->ChangeStrategy(strategy, state);
+            ++hits;
+        }
+        LOG_INFO("playerbots", "[strat_zone] zone={} state={} strategy={} hits={}",
+                 targetZone, statename.c_str(), strategy.c_str(), hits);
+        return true;
+    }
+
+    // B29 (CPP Patch 3 leftover, owner-greenlit 2026-05-08): coord-precise
+    // animated WALK for any character (not just Pythe). Form:
+    // `playerbots rndbot walk_xyz <bot> <x> <y> <z>`. Bot walks via
+    // MotionMaster::MovePoint within its current map (cross-map travel
+    // requires the existing tele_xyz path). Tier 1, no AI override needed
+    // — the orchestrator is responsible for first setting strategy to
+    // `noncombat +stay` if it wants the bot to NOT be preempted by combat
+    // AI mid-walk. For Pythe specifically, the existing pythe_actions Lua
+    // bus already has a `walk_to` verb covered by mod-ale; this SOAP path
+    // is the orchestration entry point for arbitrary RNDBOT targets.
+    if (cmd.find("walk_xyz ") == 0)
+    {
+        std::string rest = cmd.substr(9);
+        size_t s1 = rest.find(' ');
+        if (s1 == std::string::npos)
+        {
+            LOG_ERROR("playerbots", "Usage: rndbot walk_xyz <bot> <x> <y> <z>");
+            return false;
+        }
+        std::string botname = rest.substr(0, s1);
+        std::string coords  = rest.substr(s1 + 1);
+        size_t s2 = coords.find(' ');
+        size_t s3 = (s2 == std::string::npos) ? std::string::npos : coords.find(' ', s2 + 1);
+        if (s2 == std::string::npos || s3 == std::string::npos)
+        {
+            LOG_ERROR("playerbots", "Usage: rndbot walk_xyz <bot> <x> <y> <z>");
+            return false;
+        }
+        std::string xStr = coords.substr(0, s2);
+        std::string yStr = coords.substr(s2 + 1, s3 - s2 - 1);
+        std::string zStr = coords.substr(s3 + 1);
+
+        ObjectGuid bguid = sCharacterCache->GetCharacterGuidByName(botname);
+        if (!bguid)
+        {
+            LOG_ERROR("playerbots", "rndbot walk_xyz: char not found ({})", botname.c_str());
+            return false;
+        }
+        Player* bot = ObjectAccessor::FindPlayer(bguid);
+        if (!bot || !bot->GetSession())
+        {
+            LOG_ERROR("playerbots", "rndbot walk_xyz: bot {} not online", botname.c_str());
+            return false;
+        }
+
+        float x = (float)std::atof(xStr.c_str());
+        float y = (float)std::atof(yStr.c_str());
+        float z = (float)std::atof(zStr.c_str());
+
+        bot->GetMotionMaster()->MovePoint(0, x, y, z);
+        LOG_INFO("playerbots", "[walk_xyz] {} -> ({}, {}, {})",
+                 botname.c_str(), x, y, z);
+        return true;
+    }
+
     std::map<std::string, ConsoleCommandHandler> handlers;
     // handlers["initmin"] = &RandomPlayerbotMgr::RandomizeMin;
     handlers["init"] = &RandomPlayerbotMgr::RandomizeFirst;
@@ -3293,6 +3461,9 @@ void RandomPlayerbotMgr::OnPlayerLogin(Player* player)
     {
         // ObjectGuid::LowType guid = player->GetGUID().GetCounter(); //not used, conditional could be rewritten for
         // simplicity. line marked for removal.
+        // B151-a cherry-pick of upstream PR #2342: align with realm
+        // PvP on login as well as Refresh (above).
+        player->SetPvP(sWorld->IsPvPRealm());
     }
     else
     {
@@ -3638,7 +3809,13 @@ void RandomPlayerbotMgr::ChangeStrategy(Player* player)
 {
     uint32 bot = player->GetGUID().GetCounter();
 
-    if (frand(0.f, 100.f) > sPlayerbotAIConfig.randomBotRpgChance)
+    // B142.1 FIX 2026-05-13: `randomBotRpgChance` is a [0..1] probability (per
+    // its conf-comment); comparing a [0,100] roll against 0.20f made the
+    // condition true 99.8% of the time -> bots NEVER picked RPG, never went
+    // to inns/cities. Sibling chances (randomBotMinLevelChance/MaxLevelChance
+    // at lines 1921/1926) use the correct `100 * x` form; this was a stray
+    // inconsistency that explained "Dalaran feels empty" despite R7 weights.
+    if (frand(0.f, 100.f) > 100.f * sPlayerbotAIConfig.randomBotRpgChance)
     {
         LOG_INFO("playerbots", "Bot #{} <{}>: sent to grind spot", bot, player->GetName().c_str());
         ScheduleTeleport(bot, 30);
@@ -3658,7 +3835,8 @@ void RandomPlayerbotMgr::ChangeStrategyOnce(Player* player)
 {
     uint32 bot = player->GetGUID().GetCounter();
 
-    if (frand(0.f, 100.f) > sPlayerbotAIConfig.randomBotRpgChance)  // select grind / pvp
+    // B142.1 FIX 2026-05-13: same scale-mismatch fix as ChangeStrategy above.
+    if (frand(0.f, 100.f) > 100.f * sPlayerbotAIConfig.randomBotRpgChance)  // select grind / pvp
     {
         LOG_INFO("playerbots", "Bot #{} <{}>: sent to grind spot", bot, player->GetName().c_str());
         RandomTeleportForLevel(player);

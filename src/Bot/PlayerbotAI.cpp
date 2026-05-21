@@ -5,6 +5,7 @@
 
 #include "PlayerbotAI.h"
 
+#include <atomic>
 #include <cmath>
 #include <fstream>
 #include <filesystem>
@@ -56,7 +57,24 @@
 #include "Unit.h"
 #include "UpdateTime.h"
 #include "Vehicle.h"
-#include "../../../../src/server/scripts/Spells/spell_dk.cpp"
+// B142.4 FIX 2026-05-13: removed `#include "../../.../spell_dk.cpp"` -- including
+// a .cpp file causes ODR violations. Re-declare the one symbol from spell_dk.cpp
+// that this TU actually uses (PlayerbotAI.cpp:2284 references SPELL_DK_FROST_PRESENCE).
+// Defining locally is ODR-safe (the .cpp include was multiply-defining the same
+// constant across TUs).
+// B142.4-FIX2 2026-05-15: corrected value 48266 -> 48263. Per
+// src/server/scripts/Spells/spell_dk.cpp enum:
+//   SPELL_DK_BLOOD_PRESENCE  = 48266
+//   SPELL_DK_FROST_PRESENCE  = 48263
+//   SPELL_DK_UNHOLY_PRESENCE = 48265
+// Prior 48266 was BLOOD's id, which made IsTank() trigger on Blood-presence
+// auras (a DK in blood spec is already a tank per the BLOOD_TAB check; the
+// HasAura() branch was meant to also catch DPS DKs *temporarily* tanking
+// via Frost presence, but used Blood's id instead -- never fired for the
+// real case it was designed for).
+#ifndef SPELL_DK_FROST_PRESENCE
+constexpr uint32 SPELL_DK_FROST_PRESENCE = 48263;
+#endif
 
 const int SPELL_TITAN_GRIP = 49152;
 
@@ -197,6 +215,21 @@ PlayerbotAI::PlayerbotAI(Player* bot)
     botOutgoingPacketHandlers.AddHandler(SMSG_BATTLEFIELD_STATUS, "bg status");
     botOutgoingPacketHandlers.AddHandler(SMSG_LFG_ROLE_CHECK_UPDATE, "lfg role check");
     botOutgoingPacketHandlers.AddHandler(SMSG_LFG_PROPOSAL_UPDATE, "lfg proposal");
+    // P1 #994 2026-05-19: bot vote-kick handler (always-accept-master-kick).
+    botOutgoingPacketHandlers.AddHandler(SMSG_LFG_BOOT_PROPOSAL_UPDATE, "lfg vote kick");
+    // #1000 2026-05-20: LFG teleport denied observability handler.
+    botOutgoingPacketHandlers.AddHandler(SMSG_LFG_TELEPORT_DENIED, "lfg teleport denied");
+    // #1002 2026-05-20: LFG queue status observability handler.
+    botOutgoingPacketHandlers.AddHandler(SMSG_LFG_QUEUE_STATUS, "lfg queue status");
+    // #1003 2026-05-20: LFG join result observability handler.
+    botOutgoingPacketHandlers.AddHandler(SMSG_LFG_JOIN_RESULT, "lfg join result");
+    // #1027 2026-05-20: LFG role chosen per-member observability handler.
+    botOutgoingPacketHandlers.AddHandler(SMSG_LFG_ROLE_CHOSEN, "lfg role chosen");
+    // #1005 2026-05-20: LFG state-transition observability handlers.
+    botOutgoingPacketHandlers.AddHandler(SMSG_LFG_UPDATE_PLAYER, "lfg update player");
+    botOutgoingPacketHandlers.AddHandler(SMSG_LFG_UPDATE_PARTY, "lfg update party");
+    // #1008 2026-05-20: LFG dungeon-completion reward observability.
+    botOutgoingPacketHandlers.AddHandler(SMSG_LFG_PLAYER_REWARD, "lfg player reward");
     botOutgoingPacketHandlers.AddHandler(SMSG_TEXT_EMOTE, "receive text emote");
     botOutgoingPacketHandlers.AddHandler(SMSG_EMOTE, "receive emote");
     botOutgoingPacketHandlers.AddHandler(SMSG_LOOT_START_ROLL, "master loot roll");
@@ -249,6 +282,47 @@ void PlayerbotAI::UpdateAI(uint32 elapsed, bool minimal)
         bot->GetSession()->isLogingOut() || bot->IsDuringRemoveFromWorld())
         return;
 
+    // B88(A) Tier-3 (STAGED #953, 2026-05-18): per-tick AI-update budget cap.
+    // Per FIXIT row #947 + reference_bot_pop_ceiling_empirical_2026_05_18.md,
+    // raising MaxRandomBots > 150 saturates the world thread on the
+    // STEADY-STATE per-tick AI cost (not just boot-storm which #927 throttled).
+    // Each tick the world calls UpdateAI on every bot via Map::Update player
+    // iteration. With 200+ bots the sum exceeds drain capacity -> WS crash.
+    // Patch: if MaxBotAIUpdatesPerTick > 0, allow at most that many bots
+    // PER WORLD TICK to execute the expensive AI path. Bots skipped this
+    // tick simply re-run UpdateAI on the next tick (no AI loss, just
+    // amortization). World tick boundary = change in GameTime::GetGameTimeMS().
+    // Default 0 = unlimited = pre-patch behavior. SAFE-BY-DEFAULT until owner
+    // flips the conf knob. Round-robin emergent: insertion order is bot
+    // iteration order; skipped bots tick first next world iteration because
+    // their nextAICheckDelay has elapsed while ticked bots reset theirs.
+    if (sPlayerbotAIConfig.maxBotAIUpdatesPerTick > 0)
+    {
+        static std::atomic<uint64_t> s_perTickWindowMs{0};
+        static std::atomic<uint32_t> s_perTickCounter{0};
+        uint64_t nowMs = static_cast<uint64_t>(GameTime::GetGameTimeMS().count());
+        uint64_t window = s_perTickWindowMs.load(std::memory_order_relaxed);
+        if (nowMs != window)
+        {
+            // New world tick -- reset counter (CAS guards multi-thread races,
+            // though world thread is single-threaded this is defense-in-depth).
+            if (s_perTickWindowMs.compare_exchange_strong(window, nowMs,
+                std::memory_order_relaxed))
+            {
+                s_perTickCounter.store(0, std::memory_order_relaxed);
+            }
+        }
+        uint32_t ticked = s_perTickCounter.fetch_add(1, std::memory_order_relaxed);
+        if (ticked >= sPlayerbotAIConfig.maxBotAIUpdatesPerTick)
+        {
+            // Budget exhausted this tick. Skip the expensive AI path; the
+            // bot will be reconsidered on the next world tick. Do NOT touch
+            // nextAICheckDelay -- letting it stay decremented means this bot
+            // is high-priority for the next tick.
+            return;
+        }
+    }
+
     // Handle cheat options (set bot health and power if cheats are enabled)
     if (bot->IsAlive() &&
         (static_cast<uint32>(GetCheat()) > 0 || static_cast<uint32>(sPlayerbotAIConfig.botCheatMask) > 0))
@@ -270,6 +344,12 @@ void PlayerbotAI::UpdateAI(uint32 elapsed, bool minimal)
     {
         llmCheckTimer_ = 0;
         CheckLLMChatResponses();
+        // B155 (2026-05-16, per Gemini Report #5): tank threat boost.
+        // Piggy-backed on the 1 Hz llmCheckTimer so we don't add a
+        // dedicated timer. No-op when (a) config disabled, (b) not tank,
+        // (c) not in combat, (d) already ahead by threatModifier.
+        // See FIXIT.md B155 + memory/reference_report5_strategy_audit_2026_05_15.md.
+        BoostTankThreatIfTanking();
     }
 
     if (!CanUpdateAI())
@@ -401,6 +481,30 @@ void PlayerbotAI::UpdateAI(uint32 elapsed, bool minimal)
         }
     }
 
+    // WoWZoW (mod-playerbots PR #845): bot-only LFG groups auto-disband when no real
+    // player remains. Prevents zombie LFG groups occupying matchmaking slots and keeps
+    // random-bot pool clean in solo-mode. Source: upstream PR #845 (merged 2025-01-04).
+    if (bot->GetGroup() && bot->GetGroup()->isLFGGroup())
+    {
+        bool hasRealPlayer = false;
+        for (GroupReference* ref = bot->GetGroup()->GetFirstMember(); ref; ref = ref->next())
+        {
+            Player* member = ref->GetSource();
+            if (!member)
+                continue;
+            PlayerbotAI* memberAI = GET_PLAYERBOT_AI(member);
+            if (memberAI && !memberAI->IsRealPlayer())
+                continue;
+            hasRealPlayer = true;
+            break;
+        }
+        if (!hasRealPlayer)
+        {
+            bot->RemoveFromGroup();
+            ResetStrategies();
+        }
+    }
+
     // Update the bot's group status (moved to helper function)
     UpdateAIGroupMaster();
 
@@ -511,7 +615,12 @@ void PlayerbotAI::UpdateAIInternal([[maybe_unused]] uint32 elapsed, bool minimal
     {
         WorldSession* botWorldSessionPtr = bot->GetSession();
         bool logout = botWorldSessionPtr->ShouldLogOut(time(nullptr));
-        if (!master || !master->GetSession()->GetPlayer())
+        // B142.3 FIX 2026-05-13: added `!master->GetSession()` middle clause.
+        // Old code short-circuited only on !master; if master is non-null but
+        // master->GetSession() returns nullptr (mid-disconnect race), the
+        // next `->GetPlayer()` deref crashed the world thread. This path
+        // runs every bot tick during master logout.
+        if (!master || !master->GetSession() || !master->GetSession()->GetPlayer())
             logout = true;
 
         if (bot->HasFlag(PLAYER_FLAGS, PLAYER_FLAGS_RESTING) || bot->HasUnitState(UNIT_STATE_IN_FLIGHT) ||
@@ -975,6 +1084,76 @@ bool PlayerbotAI::IsAllowedCommand(std::string const text)
 
     return false;
 }
+
+// B155 (2026-05-16, per Gemini Report #5): per-second tank threat boost.
+// Tops up bot tank threat to sPlayerbotAIConfig.threatModifier x the
+// current top-of-threat-table when bot is in combat AND bot is a tank
+// role. No-op when (a) config disabled (threatModifier <= 1.0), (b) bot
+// is not a tank, (c) bot is not in combat, (d) bot already ahead by the
+// factor. Called from UpdateAI inside the existing 1 Hz llmCheckTimer
+// gate to avoid adding a dedicated tick timer.
+//
+// Why this is mod-playerbots-scoped (not a core patch): AzC's
+// ThreatManager::AddThreat doesn't have a ScriptMgr hook that mod-playerbots
+// could intercept for bot-only multiplication. A core hook would be Tier-3
+// sweeping; this 1 Hz re-add is functionally equivalent and self-contained.
+//
+// Architectural note: we call ThreatManager::AddThreat with ignoreModifiers=true
+// + ignoreRedirects=true so the boost itself isn't double-scaled by aura
+// modifiers (e.g. Salvation) or re-routed by misdirection. Boost is a flat
+// delta applied to existing threat.
+void PlayerbotAI::BoostTankThreatIfTanking()
+{
+    if (sPlayerbotAIConfig.threatModifier <= 1.0f)
+        return;
+
+    if (!bot || !bot->IsAlive() || !bot->IsInCombat())
+        return;
+
+    // Tank-role check via existing helper -- mirrors how AssistStrategy
+    // and TankTargetValue identify tanks.
+    if (!IsTank(bot))
+        return;
+
+    // Iterate units that this bot is threatened by; for each one, if our
+    // threat is below threatModifier * top-of-table, top it up.
+    auto const& threatenedByMe = bot->GetThreatMgr().GetThreatenedByMeList();
+    for (auto const& [guid, ref] : threatenedByMe)
+    {
+        // ThreatReference::GetVictim() is the enemy that holds the
+        // threat-table; GetOwner() is the bot itself. We want the
+        // enemy.
+        Unit* enemy = ref ? ref->GetVictim() : nullptr;
+        if (!enemy || !enemy->IsInWorld() || !enemy->IsAlive())
+            continue;
+
+        ThreatManager& mgr = enemy->GetThreatMgr();
+        float ourThreat = mgr.GetThreat(bot);
+        if (ourThreat <= 0.0f)
+            continue;
+
+        Unit* curVictim = mgr.GetCurrentVictim();
+        if (!curVictim)
+            continue;
+
+        float topThreat = (curVictim == bot) ? ourThreat : mgr.GetThreat(curVictim);
+        if (topThreat <= 0.0f)
+            continue;
+
+        float wanted = topThreat * sPlayerbotAIConfig.threatModifier;
+        if (ourThreat >= wanted)
+            continue; // already ahead
+
+        float boost = wanted - ourThreat;
+        // Sanity clamp: never add more than 50% of current top in one
+        // call -- prevents runaway escalation if topThreat is huge.
+        float maxBoost = topThreat * 0.5f;
+        if (boost > maxBoost)
+            boost = maxBoost;
+        mgr.AddThreat(bot, boost, nullptr, /*ignoreModifiers*/ true, /*ignoreRedirects*/ true);
+    }
+}
+
 
 void PlayerbotAI::CheckLLMChatResponses()
 {
@@ -1643,6 +1822,30 @@ void PlayerbotAI::ClearStrategies(BotState type)
         return;
 
     e->removeAllStrategies();
+}
+
+// B159-c cherry-pick of upstream PR #2365 (merged 2026-05-09): resets
+// only the combat or non-combat engine state -- wipe strategies,
+// repopulate with class/spec defaults, re-apply current map's instance
+// strategy (if any), and call Init() to rebuild trigger/action lists.
+// Invoked via the `!` prefix on /pt strategy commands.
+void PlayerbotAI::SelectiveResetStrategies(BotState type)
+{
+    Engine* e = engines[type];
+    if (!e)
+        return;
+
+    e->removeAllStrategies();
+
+    if (type == BOT_STATE_COMBAT)
+        AiFactory::AddDefaultCombatStrategies(bot, this, e);
+    else if (type == BOT_STATE_NON_COMBAT)
+        AiFactory::AddDefaultNonCombatStrategies(bot, this, e);
+
+    if (sPlayerbotAIConfig.applyInstanceStrategies)
+        ApplyInstanceStrategies(bot->GetMapId());
+
+    e->Init();
 }
 
 std::vector<std::string> PlayerbotAI::GetStrategies(BotState type)
@@ -2909,7 +3112,7 @@ bool PlayerbotAI::SayToParty(const std::string& msg)
 
 bool PlayerbotAI::SayToRaid(const std::string& msg)
 {
-    if (!bot->GetGroup() || bot->GetGroup()->isRaidGroup())
+    if (!bot->GetGroup() || !bot->GetGroup()->isRaidGroup())
         return false;
 
     WorldPacket data;
@@ -2922,6 +3125,99 @@ bool PlayerbotAI::SayToRaid(const std::string& msg)
     }
 
     return true;
+}
+
+// PROJECT_GOALS pillar 3 (2026-05-20): deterministic combat-chat callouts.
+// All three methods early-out when the conf gate `RandomBotCombatCallouts`
+// is off (default), so the cooldown map stays empty in stock deployments.
+// Templates resolved via PlayerbotTextMgr (NOT mod-ollama-chat) so they
+// fire even with the LLM event chatter disabled.
+
+bool PlayerbotAI::CombatChatOnPullStarted(Unit* target)
+{
+    if (!sPlayerbotAIConfig.randomBotCombatCallouts)
+        return false;
+    if (!bot || !target || !bot->GetGroup())
+        return false;
+
+    ObjectGuid::LowType const key = target->GetGUID().GetCounter();
+    time_t const now = time(nullptr);
+    auto it = m_combatEventCooldowns.find(key);
+    if (it != m_combatEventCooldowns.end() && (now - it->second) < 30)
+        return false;
+    m_combatEventCooldowns[key] = now;
+
+    std::map<std::string, std::string> placeholders;
+    placeholders["%target_name"] = target->GetName();
+
+    std::string const text = PlayerbotTextMgr::instance().GetBotTextOrDefault(
+        "combat_pull_started", "Pulling!", placeholders);
+
+    if (text.empty())
+        return false;
+
+    return SayToParty(text);
+}
+
+bool PlayerbotAI::CombatChatOnWipeDetected(Unit* boss)
+{
+    if (!sPlayerbotAIConfig.randomBotCombatCallouts)
+        return false;
+    if (!bot || !bot->GetGroup())
+        return false;
+
+    // Wipe key: group GUID XOR boss GUID (or 0 if boss unknown).
+    Group* group = bot->GetGroup();
+    ObjectGuid::LowType const groupKey = group->GetGUID().GetCounter();
+    ObjectGuid::LowType const bossKey = boss ? boss->GetGUID().GetCounter() : 0;
+    ObjectGuid::LowType const key = groupKey ^ bossKey;
+
+    time_t const now = time(nullptr);
+    auto it = m_combatEventCooldowns.find(key);
+    // Per-wipe-cycle: 60s minimum spacing to avoid restating during recovery.
+    if (it != m_combatEventCooldowns.end() && (now - it->second) < 60)
+        return false;
+    m_combatEventCooldowns[key] = now;
+
+    std::map<std::string, std::string> placeholders;
+    if (boss)
+        placeholders["%boss_name"] = boss->GetName();
+
+    std::string const text = PlayerbotTextMgr::instance().GetBotTextOrDefault(
+        "combat_wipe_detected", "We're wiped.", placeholders);
+
+    if (text.empty())
+        return false;
+
+    return SayToParty(text);
+}
+
+bool PlayerbotAI::CombatChatOnBossKilled(Unit* victim)
+{
+    if (!sPlayerbotAIConfig.randomBotCombatCallouts)
+        return false;
+    if (!bot || !victim || !bot->GetGroup())
+        return false;
+
+    // Boss-kill key: victim GUID + 0x1000000 offset to avoid collision with
+    // pull-cooldown keys for the same target GUID.
+    ObjectGuid::LowType const key = victim->GetGUID().GetCounter() + 0x1000000;
+    time_t const now = time(nullptr);
+    auto it = m_combatEventCooldowns.find(key);
+    if (it != m_combatEventCooldowns.end() && (now - it->second) < 60)
+        return false;
+    m_combatEventCooldowns[key] = now;
+
+    std::map<std::string, std::string> placeholders;
+    placeholders["%boss_name"] = victim->GetName();
+
+    std::string const text = PlayerbotTextMgr::instance().GetBotTextOrDefault(
+        "combat_boss_down", "Boss down!", placeholders);
+
+    if (text.empty())
+        return false;
+
+    return SayToParty(text);
 }
 
 bool PlayerbotAI::Yell(const std::string& msg)
@@ -5612,7 +5908,7 @@ Item* PlayerbotAI::FindStoneFor(Item* weapon) const
         SOLID_SHARPENING_STONE,      HEAVY_SHARPENING_STONE, COARSE_SHARPENING_STONE,    ROUGH_SHARPENING_STONE};
 
     static const std::vector<uint32_t> uPrioritizedWeightStoneIds = {
-        ADAMANTITE_WEIGHTSTONE, FEL_WEIGHTSTONE,    DENSE_WEIGHTSTONE, SOLID_WEIGHTSTONE,
+        ADAMANTITE_WEIGHTSTONE, FEL_WEIGHTSTONE,    ELEMENTAL_SHARPENING_STONE, DENSE_WEIGHTSTONE, SOLID_WEIGHTSTONE,
         HEAVY_WEIGHTSTONE,      COARSE_WEIGHTSTONE, ROUGH_WEIGHTSTONE};
 
     Item* stone = nullptr;

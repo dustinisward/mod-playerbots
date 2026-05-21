@@ -68,6 +68,7 @@
 #include "FishingAction.h"
 #include "CancelChannelAction.h"
 #include "WaitForAttackAction.h"
+#include "WipeDetectionAction.h"
 
 class PlayerbotAI;
 
@@ -114,6 +115,8 @@ public:
         creators["return to pull position"] = &ActionContext::return_to_pull_position;
         creators["reach pull"] = &ActionContext::reach_pull;
         creators["end pull"] = &ActionContext::end_pull;
+        // PROJECT_GOALS pillar 3 (2026-05-20): wipe-detection callout action.
+        creators["wipe chat"] = &ActionContext::wipe_chat;
         creators["healthstone"] = &ActionContext::healthstone;
         creators["healing potion"] = &ActionContext::healing_potion;
         creators["mana potion"] = &ActionContext::mana_potion;
@@ -328,6 +331,8 @@ private:
     static Action* pull_end(PlayerbotAI* botAI) { return new PullEndAction(botAI); }
     static Action* return_to_pull_position(PlayerbotAI* botAI) { return new ReturnToPullPositionAction(botAI); }
     static Action* reach_pull(PlayerbotAI* botAI) { return new ReachPullAction(botAI); }
+    // PROJECT_GOALS pillar 3 (2026-05-20): wipe-detection callout factory.
+    static Action* wipe_chat(PlayerbotAI* botAI) { return new WipeDetectionAction(botAI); }
     static Action* mana_tap(PlayerbotAI* botAI) { return new CastManaTapAction(botAI); }
     static Action* end_pull(PlayerbotAI* botAI) { return new ChangeCombatStrategyAction(botAI, "-pull"); }
     static Action* cancel_channel(PlayerbotAI* botAI) { return new CancelChannelAction(botAI); }

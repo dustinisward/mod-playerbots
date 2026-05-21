@@ -27,6 +27,12 @@ void DeadStrategy::InitTriggers(std::vector<TriggerNode*>& triggers)
         new TriggerNode("location stuck", { NextAction("repop", relevance + 1) }));
     triggers.push_back(new TriggerNode(
         "can self resurrect", { NextAction("self resurrect", relevance + 2.0f) }));
+
+    // PROJECT_GOALS pillar 3 (2026-05-20): wipe-detection callout.
+    // Action body gates on `AiPlayerbot.RandomBotCombatCallouts` + group-fully-wiped
+    // check + 60s cooldown, so polling here every dead-engine tick is safe.
+    triggers.push_back(
+        new TriggerNode("dead", { NextAction("wipe chat", 1.0f) }));
 }
 
 DeadStrategy::DeadStrategy(PlayerbotAI* botAI) : PassTroughStrategy(botAI) {}

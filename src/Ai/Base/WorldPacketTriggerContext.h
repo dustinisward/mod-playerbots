@@ -62,6 +62,26 @@ public:
         creators["guild invite"] = &WorldPacketTriggerContext::guild_invite;
         creators["petition offer"] = &WorldPacketTriggerContext::petition_offer;
         creators["lfg teleport"] = &WorldPacketTriggerContext::lfg_teleport;
+        // P1 #994 2026-05-19: bot vote-kick trigger fires on
+        // SMSG_LFG_BOOT_PROPOSAL_UPDATE (server-emitted boot proposal).
+        creators["lfg vote kick"] = &WorldPacketTriggerContext::lfg_vote_kick;
+        // #1000 2026-05-20: LFG teleport denied trigger fires on
+        // SMSG_LFG_TELEPORT_DENIED so the bot logs the reason.
+        creators["lfg teleport denied"] = &WorldPacketTriggerContext::lfg_teleport_denied;
+        // #1002 2026-05-20: LFG queue status trigger fires on
+        // SMSG_LFG_QUEUE_STATUS (~30s cadence while in queue).
+        creators["lfg queue status"] = &WorldPacketTriggerContext::lfg_queue_status;
+        // #1003 2026-05-20: LFG join result trigger fires on
+        // SMSG_LFG_JOIN_RESULT (immediate after CMSG_LFG_JOIN).
+        creators["lfg join result"] = &WorldPacketTriggerContext::lfg_join_result;
+        // #1027 2026-05-20: LFG role chosen trigger fires per-member during rolecheck.
+        creators["lfg role chosen"] = &WorldPacketTriggerContext::lfg_role_chosen;
+        // #1005 2026-05-20: LFG state-transition triggers fire on
+        // SMSG_LFG_UPDATE_PLAYER (self) and SMSG_LFG_UPDATE_PARTY (broadcast).
+        creators["lfg update player"] = &WorldPacketTriggerContext::lfg_update_player;
+        creators["lfg update party"] = &WorldPacketTriggerContext::lfg_update_party;
+        // #1008 2026-05-20: LFG dungeon-completion trigger.
+        creators["lfg player reward"] = &WorldPacketTriggerContext::lfg_player_reward;
         creators["inventory change failure"] = &WorldPacketTriggerContext::inventory_change_failure;
         creators["bg status"] = &WorldPacketTriggerContext::bg_status;
         creators["levelup"] = &WorldPacketTriggerContext::levelup;
@@ -80,6 +100,14 @@ private:
     static Trigger* inventory_change_failure(PlayerbotAI* botAI) { return new WorldPacketTrigger(botAI, "inventory change failure"); }
     static Trigger* guild_invite(PlayerbotAI* botAI) { return new WorldPacketTrigger(botAI, "guild invite"); }
     static Trigger* lfg_teleport(PlayerbotAI* botAI) { return new WorldPacketTrigger(botAI, "lfg teleport"); }
+    static Trigger* lfg_vote_kick(PlayerbotAI* botAI) { return new WorldPacketTrigger(botAI, "lfg vote kick"); }
+    static Trigger* lfg_teleport_denied(PlayerbotAI* botAI) { return new WorldPacketTrigger(botAI, "lfg teleport denied"); }
+    static Trigger* lfg_queue_status(PlayerbotAI* botAI) { return new WorldPacketTrigger(botAI, "lfg queue status"); }
+    static Trigger* lfg_join_result(PlayerbotAI* botAI) { return new WorldPacketTrigger(botAI, "lfg join result"); }
+    static Trigger* lfg_role_chosen(PlayerbotAI* botAI) { return new WorldPacketTrigger(botAI, "lfg role chosen"); }
+    static Trigger* lfg_update_player(PlayerbotAI* botAI) { return new WorldPacketTrigger(botAI, "lfg update player"); }
+    static Trigger* lfg_update_party(PlayerbotAI* botAI) { return new WorldPacketTrigger(botAI, "lfg update party"); }
+    static Trigger* lfg_player_reward(PlayerbotAI* botAI) { return new WorldPacketTrigger(botAI, "lfg player reward"); }
     static Trigger* lfg_leave(PlayerbotAI* botAI) { return new WorldPacketTrigger(botAI, "lfg leave"); }
     static Trigger* lfg_proposal(PlayerbotAI* botAI) { return new WorldPacketTrigger(botAI, "lfg proposal"); }
     static Trigger* lfg_role_check(PlayerbotAI* botAI) { return new WorldPacketTrigger(botAI, "lfg role check"); }

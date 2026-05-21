@@ -80,6 +80,14 @@ WorldPacketHandlerStrategy::WorldPacketHandlerStrategy(PlayerbotAI* botAI) : Pas
     supported.push_back("uninvite");
     supported.push_back("lfg role check");
     supported.push_back("lfg teleport");
+    supported.push_back("lfg vote kick");  // P1 #994 2026-05-19
+    supported.push_back("lfg teleport denied");  // #1000 2026-05-20
+    supported.push_back("lfg queue status");  // #1002 2026-05-20
+    supported.push_back("lfg join result");  // #1003 2026-05-20
+    supported.push_back("lfg role chosen");  // #1027 2026-05-20
+    supported.push_back("lfg update player");  // #1005 2026-05-20
+    supported.push_back("lfg update party");   // #1005 2026-05-20
+    supported.push_back("lfg player reward");  // #1008 2026-05-20
     supported.push_back("random bot update");
     supported.push_back("inventory change failure");
     supported.push_back("bg status");

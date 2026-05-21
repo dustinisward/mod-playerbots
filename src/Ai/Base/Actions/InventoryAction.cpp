@@ -5,10 +5,44 @@
 
 #include "InventoryAction.h"
 
+#include <algorithm>
+#include <array>
+#include <string_view>
+
 #include "Event.h"
 #include "ItemCountValue.h"
 #include "ItemVisitors.h"
 #include "Playerbots.h"
+
+namespace
+{
+// B159-a cherry-pick of upstream PR #2356 (merged 2026-05-09): when the
+// bot's chat parser sees a generic qualifier ("food", "drink", "ammo",
+// "mount", "quest", "recipe", etc.), skip the FindNamedItemVisitor pass
+// so we don't accidentally match real items whose names contain those
+// reserved words.
+bool isReservedQualifier(std::string const& text)
+{
+    static std::array<std::string_view, 13> const exactQualifiers = {
+        "ammo",
+        "conjured drink",
+        "conjured food",
+        "conjured water",
+        "drink",
+        "food",
+        "healing potion",
+        "mount",
+        "mana potion",
+        "pet",
+        "quest",
+        "recipe",
+        "water"
+    };
+
+    return std::find(exactQualifiers.begin(), exactQualifiers.end(), text) != exactQualifiers.end() ||
+        text.rfind("usage ", 0) == 0;
+}
+}
 
 void InventoryAction::IterateItems(IterateItemsVisitor* visitor, IterateItemsMask mask)
 {
@@ -292,9 +326,14 @@ std::vector<Item*> InventoryAction::parseItems(std::string const text, IterateIt
         found.insert(visitor.GetResult().begin(), visitor.GetResult().end());
     }
 
-    FindNamedItemVisitor visitor(bot, text);
-    IterateItems(&visitor, ITERATE_ITEMS_IN_BAGS);
-    found.insert(visitor.GetResult().begin(), visitor.GetResult().end());
+    // B159-a cherry-pick of upstream PR #2356: skip named-item lookup
+    // for reserved qualifier strings to prevent false-match.
+    if (!isReservedQualifier(text))
+    {
+        FindNamedItemVisitor visitor(bot, text);
+        IterateItems(&visitor, ITERATE_ITEMS_IN_BAGS);
+        found.insert(visitor.GetResult().begin(), visitor.GetResult().end());
+    }
 
     uint32 quality = chat->parseItemQuality(text);
     if (quality != MAX_ITEM_QUALITY)

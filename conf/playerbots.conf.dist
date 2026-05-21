@@ -177,6 +177,13 @@ AiPlayerbot.RandomBotInvitePlayer = 0
 # Bots will chat in say/guild when they invite other bots to groups/raids/guilds
 AiPlayerbot.InviteChat = 0
 
+# Combat event callouts (deterministic <500ms party chat on pulls/wipes/boss kills).
+# Uses PlayerbotTextMgr templates, NOT LLM. Fires BEFORE LLM event queueing
+# so it works even with mod-ollama-chat disabled. PROJECT_GOALS pillar 3.
+# 0 = disabled (silent bots)
+# 1 = enabled (default for solo-mode; bots call out pulls, wipes, boss kills)
+AiPlayerbot.RandomBotCombatCallouts = 1
+
 # Bots will be automatically summoned to the player when they accept a group invitation
 AiPlayerbot.SummonWhenGroup = 1
 

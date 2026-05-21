@@ -96,6 +96,24 @@ public:
     {
         if (!player->GetSession()->IsBot())
         {
+            // B146 (2026-05-13): WoWZoW persistent morph overrides. Keep
+            // race/faction/abilities/talents intact; only the rendered model
+            // changes. Auto-applied at every login (no manual .morph typing).
+            // Owner-requested for Sushh (guid=32892) -> Blood Elf Female body
+            // while keeping Night Elf race + Alliance + NE racials. Hardcoded
+            // map for now; future ship may move to a `wowzow_morph_overrides`
+            // DB table for runtime adjustment.
+            static const std::unordered_map<uint32, uint32> _wowzowMorphOverrides = {
+                {32892u, 16115u},  // Sushh: NE Rogue keeps race, displays as BE Female (Magistrix Aminel base model)
+            };
+            uint32 charGuid = player->GetGUID().GetCounter();
+            auto morphIt = _wowzowMorphOverrides.find(charGuid);
+            if (morphIt != _wowzowMorphOverrides.end())
+            {
+                player->SetDisplayId(morphIt->second);
+                player->SetNativeDisplayId(morphIt->second);
+            }
+
             PlayerbotsMgr::instance().AddPlayerbotData(player, false);
             sRandomPlayerbotMgr.OnPlayerLogin(player);
 
@@ -388,22 +406,198 @@ class PlayerbotsScript : public PlayerbotScript
 public:
     PlayerbotsScript() : PlayerbotScript("PlayerbotsScript") {}
 
+    // WoWZoW (Wishmaster #1521 thread-safe port via PR #1143 pattern, 2026-05-20):
+    //   Robust LFG queue-eligibility check. Three changes over the old loop:
+    //     1. Filter placeholder GUIDs (empty / non-Player / non-Group) so the
+    //        very first LFG frame -- where the core has not yet populated the
+    //        member list -- does not veto with a false negative (was producing
+    //        "dungeon 0 / type 0" + LFG_ROLECHECK_MISSING_ROLE timeouts; see
+    //        B169 trace path #1).
+    //     2. Distinguish real players, bots, offline members, group-GUID
+    //        sentinel. The hybrid policy preserves the old semantics
+    //        (allow only with a real player / group GUID) for fully populated
+    //        frames while letting placeholder-only frames slide.
+    //     3. On detecting an offline member with otherwise-populated slots,
+    //        soft-reset each bot's AI (clears "lfg proposal" / role-check) and
+    //        return false to force a clean retry next tick. This is the inline
+    //        equivalent of the "toggle bots off/on" workaround users found.
+    //   Thread safety: this hook fires from LFGMgr::Update() on the world
+    //   thread. botAI->Reset(true) mutates AI-local state only (no sLFGMgr
+    //   touch). No new direct sLFGMgr->Join/Leave/SetRoles calls are added --
+    //   PR #1143's simulated-packet pattern at LfgActions.cpp:200-211 remains
+    //   the sole join path.
     bool OnPlayerbotCheckLFGQueue(lfg::Lfg5Guids const& guidsList) override
     {
-        bool nonBotFound = false;
+        const size_t totalSlots = guidsList.guids.size();
+        size_t ignoredEmpty = 0;
+        size_t ignoredNonPlayer = 0;
+        size_t offlinePlayers = 0;
+        size_t botPlayers = 0;
+        size_t realPlayers = 0;
+        bool groupGuidSeen = false;
 
-        for (ObjectGuid const& guid : guidsList.guids)
+        LOG_DEBUG("playerbots", "[LFG] check start: slots={}", totalSlots);
+
+        for (size_t i = 0; i < totalSlots; ++i)
         {
-            Player* player = ObjectAccessor::FindPlayer(guid);
+            ObjectGuid const& guid = guidsList.guids[i];
 
-            if (guid.IsGroup() || (player && !PlayerbotsMgr::instance().GetPlayerbotAI(player)))
+            // 1) Placeholders to ignore (early-frame pre-population artifacts).
+            if (guid.IsEmpty())
             {
-                nonBotFound = true;
-                break;
+                ++ignoredEmpty;
+                LOG_DEBUG("playerbots", "[LFG] slot {}: <empty> -> ignored", i);
+                continue;
+            }
+
+            // Group GUID counts as "real player present" for compat with the
+            // pre-port behavior (the old loop treated IsGroup() as non-bot).
+            if (guid.IsGroup())
+            {
+                groupGuidSeen = true;
+                LOG_DEBUG("playerbots",
+                          "[LFG] slot {}: <GROUP GUID> -> counts as real-player (compat)", i);
+                continue;
+            }
+
+            // Other non-Player GUIDs: pet/object/item placeholders, ignore.
+            if (!guid.IsPlayer())
+            {
+                ++ignoredNonPlayer;
+                LOG_DEBUG("playerbots",
+                          "[LFG] slot {}: guid={} (non-player/high={}) -> ignored",
+                          i,
+                          static_cast<uint64>(guid.GetRawValue()),
+                          (unsigned)guid.GetHigh());
+                continue;
+            }
+
+            // 2) Player slot -- online?
+            Player* player = ObjectAccessor::FindPlayer(guid);
+            if (!player)
+            {
+                ++offlinePlayers;
+                LOG_DEBUG("playerbots",
+                          "[LFG] slot {}: player guid={} offline/not-in-world",
+                          i,
+                          static_cast<uint64>(guid.GetRawValue()));
+                continue;
+            }
+
+            // 3) Bot vs real player.
+            if (PlayerbotsMgr::instance().GetPlayerbotAI(player) != nullptr)
+            {
+                ++botPlayers;
+                LOG_DEBUG("playerbots",
+                          "[LFG] slot {}: BOT {} (lvl {}, class {})",
+                          i,
+                          player->GetName().c_str(),
+                          player->GetLevel(),
+                          player->getClass());
+            }
+            else
+            {
+                ++realPlayers;
+                LOG_DEBUG("playerbots",
+                          "[LFG] slot {}: REAL {} (lvl {}, class {})",
+                          i,
+                          player->GetName().c_str(),
+                          player->GetLevel(),
+                          player->getClass());
             }
         }
 
-        return nonBotFound;
+        // "Ultra-early phase" detection: no resolvable players AND every slot
+        // was a placeholder. Do NOT veto -- let the core finish populating.
+        const bool onlyPlaceholders =
+            (realPlayers + botPlayers + (groupGuidSeen ? 1 : 0)) == 0 &&
+            (ignoredEmpty + ignoredNonPlayer) == totalSlots;
+
+        // Soft preflight: real members visible AND at least one offline.
+        if (!onlyPlaceholders && offlinePlayers > 0)
+        {
+            // Prefer a real online player as leader-proxy; fall back to any
+            // online player (bot or real).
+            Player* leader = nullptr;
+
+            for (ObjectGuid const& guid : guidsList.guids)
+            {
+                if (!guid.IsPlayer())
+                    continue;
+                if (Player* p = ObjectAccessor::FindPlayer(guid))
+                {
+                    if (PlayerbotsMgr::instance().GetPlayerbotAI(p) == nullptr)
+                    {
+                        leader = p;
+                        break;
+                    }
+                }
+            }
+
+            if (!leader)
+            {
+                for (ObjectGuid const& guid : guidsList.guids)
+                {
+                    if (!guid.IsPlayer())
+                        continue;
+                    if (Player* p = ObjectAccessor::FindPlayer(guid))
+                    {
+                        leader = p;
+                        break;
+                    }
+                }
+            }
+
+            if (leader)
+            {
+                Group* g = leader->GetGroup();
+                if (g)
+                {
+                    LOG_DEBUG("playerbots",
+                              "[LFG-RESET] group members={}, isRaid={}, isLFGGroup={}",
+                              (int)g->GetMembersCount(),
+                              g->isRaidGroup() ? 1 : 0,
+                              g->isLFGGroup() ? 1 : 0);
+
+                    // Soft reset of LFG-related AI state on every bot member.
+                    // Reset(true) clears "lfg proposal" and resets engines; it
+                    // does NOT call into sLFGMgr.
+                    for (GroupReference* ref = g->GetFirstMember(); ref; ref = ref->next())
+                    {
+                        Player* member = ref->GetSource();
+                        if (!member)
+                            continue;
+
+                        if (PlayerbotAI* ai = PlayerbotsMgr::instance().GetPlayerbotAI(member))
+                            ai->Reset(true);
+                    }
+                }
+            }
+
+            LOG_DEBUG("playerbots",
+                      "[LFG] preflight soft-reset triggered (offline detected) -> allowQueue=no (retry)");
+            return false;  // small deliberate retry after reset
+        }
+
+        // Hybrid policy: permissive in placeholder-only frames; otherwise the
+        // original semantics (no offline AND at least one real player OR a
+        // group GUID).
+        bool allowQueue = onlyPlaceholders
+                              ? true
+                              : ((offlinePlayers == 0) && (realPlayers >= 1 || groupGuidSeen));
+
+        LOG_DEBUG("playerbots",
+                  "[LFG] summary: slots={}, real={}, bots={}, offline={}, "
+                  "ignored(empty+nonPlayer)={}, groupGuidSeen={} -> allowQueue={}",
+                  totalSlots,
+                  realPlayers,
+                  botPlayers,
+                  offlinePlayers,
+                  (ignoredEmpty + ignoredNonPlayer),
+                  (groupGuidSeen ? "yes" : "no"),
+                  (allowQueue ? "yes" : "no"));
+
+        return allowQueue;
     }
 
     void OnPlayerbotCheckKillTask(Player* player, Unit* victim) override

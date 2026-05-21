@@ -166,7 +166,14 @@ bool Engine::DoNextAction(Unit* /*unit*/, uint32 /*depth*/, bool minimal)
         bool skipPrerequisites = basket->isSkipPrerequisites();
 
         if (minimal && (relevance < 100))
+        {
+            // B142.5 FIX 2026-05-13: was bare `continue` after Peek() without
+            // Pop() -- same low-relevance basket re-peeked every iter, burning
+            // all iterationsPerTick on one stuck action. Drop the basket so
+            // the queue advances. Pop() deletes the basket per L172 NOTE.
+            delete queue.Pop();
             continue;
+        }
 
         Event event = basket->getEvent();
         ActionNode* actionNode = queue.Pop();  // NOTE: Pop() deletes basket

@@ -102,7 +102,11 @@ uint8 AiFactory::GetPlayerSpecTab(Player* bot)
 
 std::map<uint8, uint32> AiFactory::GetPlayerSpecTabs(Player* bot)
 {
-    std::map<uint8, uint32> tabs = {{0, 0}, {0, 0}, {0, 0}};
+    // B125 FIX 2026-05-13: was `{{0, 0}, {0, 0}, {0, 0}}` -- all three pairs
+    // had key 0, so std::map deduplicated to a single entry. GetPlayerSpecTab()
+    // below iterates i<3 expecting keys {0,1,2}; mis-detection of bot spec ->
+    // wrong AI strategy loaded across all classes/specs.
+    std::map<uint8, uint32> tabs = {{0, 0}, {1, 0}, {2, 0}};
     const PlayerTalentMap& talentMap = bot->GetTalentMap();
     for (PlayerTalentMap::const_iterator i = talentMap.begin(); i != talentMap.end(); ++i)
     {
@@ -172,6 +176,16 @@ BotRoles AiFactory::GetPlayerRoles(Player* player)
                 role = (BotRoles)(BOT_ROLE_TANK | BOT_ROLE_DPS);
             else if (tab == DRUID_TAB_RESTORATION)
                 role = BOT_ROLE_HEALER;
+            break;
+        // B142.2 FIX 2026-05-13: was no DK case -> all DKs fell through to
+        // default BOT_ROLE_DPS. Lordaeron empirical profile: 55% of DKs are
+        // Blood Tank. Zero DK tanks registering meant RDF queue starved on
+        // the tank role. DEATH_KNIGHT_TAB_BLOOD == 0.
+        case CLASS_DEATH_KNIGHT:
+            if (tab == DEATH_KNIGHT_TAB_BLOOD)
+                role = BOT_ROLE_TANK;
+            else
+                role = BOT_ROLE_DPS;
             break;
         default:
             role = BOT_ROLE_DPS;
